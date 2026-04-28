@@ -941,7 +941,7 @@ WRITE_ROOT = DATA_ROOT / "_cross_corpus_rebuild" / "05_scibert_solarphysics_sear
 RUN_TS = datetime.now().strftime("%Y%m%d_%H%M%S")
 
 BASE_MODEL_ID = "allenai/scibert_scivocab_uncased"
-MAX_SEQ_LEN = 256
+MAX_SEQ_LEN = 384
 MIN_TOKENS = 16
 MAX_DAPT_DOCS = None
 MAX_CONTRASTIVE_PAIRS = 120000
@@ -949,10 +949,10 @@ DAPT_EVAL_DOCS = 4000
 RUN_DAPT = True
 RUN_CONTRASTIVE = True
 FORCE_RETRAIN = False
-DAPT_EPOCHS = 1
-CONTRASTIVE_EPOCHS = 1
-DAPT_BATCH_SIZE = 8
-CONTRASTIVE_BATCH_SIZE = 32
+DAPT_EPOCHS = 2
+CONTRASTIVE_EPOCHS = 2
+DAPT_BATCH_SIZE = 16
+CONTRASTIVE_BATCH_SIZE = 64
 TOPICS_PER_CORPUS_FOR_AUDIT = 12
 RUN_HISTORICAL_AB_EVAL = True
 MIN_TECHNIQUE_LABEL_FREQ = 40
@@ -1814,106 +1814,114 @@ else:
     from huggingface_hub import login
 
     token = os.environ.get(HF_TOKEN_ENV, "").strip() or None
-    if token:
-        login(token=token, add_to_git_credential=False)
-        hf_report["auth_mode"] = "env_token"
-        log(f"[hf] autenticado via variavel de ambiente {HF_TOKEN_ENV}.")
+    if not token:
+        hf_report["status"] = "skipped_missing_token"
+        hf_report["error"] = (
+            f"Variavel {HF_TOKEN_ENV} ausente. Defina um token Hugging Face com permissao de escrita "
+            "antes de rerodar esta celula."
+        )
+        log(f"[hf] {HF_TOKEN_ENV} ausente. Pulando a publicacao sem derrubar o notebook.")
     else:
-        log(f"[hf] {HF_TOKEN_ENV} ausente. Sera solicitado login interativo no Colab.")
-        login()
-        hf_report["auth_mode"] = "interactive_login"
+        try:
+            login(token=token, add_to_git_credential=False)
+            hf_report["auth_mode"] = "env_token"
+            log(f"[hf] autenticado via variavel de ambiente {HF_TOKEN_ENV}.")
 
-    retrieval_path = REPORTS_DIR / "eval_retrieval_tecnica.csv"
-    clustering_path = REPORTS_DIR / "eval_clustering_tecnica.csv"
-    nearest_centroid_path = REPORTS_DIR / "eval_nearest_centroid.csv"
-    dapt_metrics_path = REPORTS_DIR / "dapt_eval_metrics.json"
+            retrieval_path = REPORTS_DIR / "eval_retrieval_tecnica.csv"
+            clustering_path = REPORTS_DIR / "eval_clustering_tecnica.csv"
+            nearest_centroid_path = REPORTS_DIR / "eval_nearest_centroid.csv"
+            dapt_metrics_path = REPORTS_DIR / "dapt_eval_metrics.json"
 
-    model_card_lines = [
-        "---",
-        "license: apache-2.0",
-        "library_name: sentence-transformers",
-        f"base_model: {BASE_MODEL_ID}",
-        "tags:",
-        "- solar-physics",
-        "- scientific-retrieval",
-        "- sentence-transformers",
-        "- scibert",
-        "- major-review-rebuild",
-        "---",
-        "",
-        "# SciBERT-SolarPhysics-Search",
-        "",
-        "Modelo canonico reconstruido para o major review, treinado somente em `Nucleo_core`, `PIML_core` e `CombFinal_core`.",
-        "",
-        "## Metodo",
-        "",
-        "- `DAPT` (MLM) sobre o corpus de dominio do `core`.",
-        "- Fine-tuning contrastivo com `query_side -> positive_side`.",
-        "- Sem uso de `ML_Multimodal` no treino.",
-        "",
-        "## Compatibilidade com o paper",
-        "",
-        "- O notebook 05 calcula `perplexity`, `NMI`, `ARI`, `Silhouette`, `MRR`, `Recall@K` e `NearestCentroidAcc`.",
-        "- Os notebooks 06 a 08 calculam o incremento aprovado do major review (`SciBERT generic`, `BM25`, core vs holdout, bootstrap CIs e auditoria final).",
-        "",
-    ]
-
-    if dapt_metrics_path.exists():
-        dapt_metrics = json.loads(dapt_metrics_path.read_text(encoding="utf-8"))
-        model_card_lines.extend(
-            [
-                "## DAPT",
+            model_card_lines = [
+                "---",
+                "license: apache-2.0",
+                "library_name: sentence-transformers",
+                f"base_model: {BASE_MODEL_ID}",
+                "tags:",
+                "- solar-physics",
+                "- scientific-retrieval",
+                "- sentence-transformers",
+                "- scibert",
+                "- major-review-rebuild",
+                "---",
                 "",
-                f"- eval_loss: {dapt_metrics.get('eval_loss')}",
-                f"- perplexity: {dapt_metrics.get('perplexity')}",
+                "# SciBERT-SolarPhysics-Search",
+                "",
+                "Modelo canonico reconstruido para o major review, treinado somente em `Nucleo_core`, `PIML_core` e `CombFinal_core`.",
+                "",
+                "## Metodo",
+                "",
+                "- `DAPT` (MLM) sobre o corpus de dominio do `core`.",
+                "- Fine-tuning contrastivo com `query_side -> positive_side`.",
+                "- Sem uso de `ML_Multimodal` no treino.",
+                "",
+                "## Compatibilidade com o paper",
+                "",
+                "- O notebook 05 calcula `perplexity`, `NMI`, `ARI`, `Silhouette`, `MRR`, `Recall@K` e `NearestCentroidAcc`.",
+                "- Os notebooks 06 a 08 calculam o incremento aprovado do major review (`SciBERT generic`, `BM25`, core vs holdout, bootstrap CIs e auditoria final).",
                 "",
             ]
-        )
 
-    if retrieval_path.exists():
-        model_card_lines.extend(
-            [
-                "## Retrieval por classe (Tecnica)",
-                "",
-                pd.read_csv(retrieval_path).to_markdown(index=False),
-                "",
-            ]
-        )
+            if dapt_metrics_path.exists():
+                dapt_metrics = json.loads(dapt_metrics_path.read_text(encoding="utf-8"))
+                model_card_lines.extend(
+                    [
+                        "## DAPT",
+                        "",
+                        f"- eval_loss: {dapt_metrics.get('eval_loss')}",
+                        f"- perplexity: {dapt_metrics.get('perplexity')}",
+                        "",
+                    ]
+                )
 
-    if clustering_path.exists():
-        model_card_lines.extend(
-            [
-                "## Clusterizacao (Tecnica)",
-                "",
-                pd.read_csv(clustering_path).to_markdown(index=False),
-                "",
-            ]
-        )
+            if retrieval_path.exists():
+                model_card_lines.extend(
+                    [
+                        "## Retrieval por classe (Tecnica)",
+                        "",
+                        pd.read_csv(retrieval_path).to_markdown(index=False),
+                        "",
+                    ]
+                )
 
-    if nearest_centroid_path.exists():
-        model_card_lines.extend(
-            [
-                "## Separabilidade por centroide",
-                "",
-                pd.read_csv(nearest_centroid_path).to_markdown(index=False),
-                "",
-            ]
-        )
+            if clustering_path.exists():
+                model_card_lines.extend(
+                    [
+                        "## Clusterizacao (Tecnica)",
+                        "",
+                        pd.read_csv(clustering_path).to_markdown(index=False),
+                        "",
+                    ]
+                )
 
-    (FINAL_MODEL_DIR / "README.md").write_text("\n".join(model_card_lines), encoding="utf-8")
+            if nearest_centroid_path.exists():
+                model_card_lines.extend(
+                    [
+                        "## Separabilidade por centroide",
+                        "",
+                        pd.read_csv(nearest_centroid_path).to_markdown(index=False),
+                        "",
+                    ]
+                )
 
-    publish_model = SentenceTransformer(str(FINAL_MODEL_DIR), device="cuda" if torch.cuda.is_available() else "cpu")
-    push_result = publish_model.push_to_hub(
-        HF_REPO_ID,
-        token=token,
-        private=HF_PRIVATE,
-        commit_message=HF_COMMIT_MESSAGE,
-        exist_ok=True,
-        replace_model_card=True,
-    )
-    hf_report["status"] = "published"
-    hf_report["push_result"] = push_result
-    log(f"[hf] publicacao concluida em {HF_REPO_ID}")
+            (FINAL_MODEL_DIR / "README.md").write_text("\n".join(model_card_lines), encoding="utf-8")
+
+            publish_model = SentenceTransformer(str(FINAL_MODEL_DIR), device="cuda" if torch.cuda.is_available() else "cpu")
+            push_result = publish_model.push_to_hub(
+                HF_REPO_ID,
+                token=token,
+                private=HF_PRIVATE,
+                commit_message=HF_COMMIT_MESSAGE,
+                exist_ok=True,
+                replace_model_card=True,
+            )
+            hf_report["status"] = "published"
+            hf_report["push_result"] = push_result
+            log(f"[hf] publicacao concluida em {HF_REPO_ID}")
+        except Exception as exc:
+            hf_report["status"] = "failed"
+            hf_report["error"] = repr(exc)
+            log(f"[hf] falha na publicacao: {exc}")
 
 with open(REPORTS_DIR / "hf_publish_report.json", "w", encoding="utf-8") as fh:
     json.dump(hf_report, fh, indent=2, ensure_ascii=False)
