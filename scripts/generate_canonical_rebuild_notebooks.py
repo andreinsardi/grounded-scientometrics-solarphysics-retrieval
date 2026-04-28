@@ -904,7 +904,7 @@ import numpy as np
 import pandas as pd
 import torch
 from datasets import Dataset
-from sentence_transformers import InputExample, SentenceTransformer, losses
+from sentence_transformers import InputExample, SentenceTransformer, losses, models
 from torch.utils.data import DataLoader
 from transformers import (
     AutoModelForMaskedLM,
@@ -955,10 +955,16 @@ DAPT_BATCH_SIZE = 16
 CONTRASTIVE_BATCH_SIZE = 64
 TOPICS_PER_CORPUS_FOR_AUDIT = 12
 RUN_HISTORICAL_AB_EVAL = True
-MIN_TECHNIQUE_LABEL_FREQ = 40
-MAX_AB_EVAL_DOCS = 16000
+MIN_TECHNIQUE_LABEL_FREQ = 10
+MAX_AB_EVAL_DOCS = 8000
 AB_RECALL_KS = (10, 50, 100)
 AB_UMAP_SAMPLE = 5000
+HISTORICAL_AB_EVAL_CORPORA = ["Nucleo", "PIML", "CombFinal", "ML_Multimodal"]
+PAIR_SAMPLE_CAPS = {
+    "Nucleo": 10000,
+    "PIML": 12000,
+    "CombFinal": 4000,
+}
 RUN_HF_PUBLISH = False
 HF_REPO_ID = "andreinsardi/SciBERT-SolarPhysics-Search"
 HF_PRIVATE = False
@@ -975,6 +981,7 @@ print("RUN_DAPT =", RUN_DAPT)
 print("RUN_CONTRASTIVE =", RUN_CONTRASTIVE)
 print("RUN_HISTORICAL_AB_EVAL =", RUN_HISTORICAL_AB_EVAL)
 print("RUN_HF_PUBLISH =", RUN_HF_PUBLISH)
+print("HISTORICAL_AB_EVAL_CORPORA =", HISTORICAL_AB_EVAL_CORPORA)
 '''
 
 
@@ -1093,8 +1100,10 @@ def prepare_train_frame(corpus: str) -> pd.DataFrame:
     raw["corpus"] = corpus
     raw["title_clean"] = raw["TI"].map(normalize_semantic_text)
     raw["abstract_clean"] = raw["AB"].map(normalize_semantic_text)
+    raw["de_clean"] = raw["DE"].map(normalize_semantic_text)
+    raw["id_clean"] = raw["ID"].map(normalize_semantic_text)
     raw["keywords_clean"] = (
-        raw["DE"].fillna("").astype(str) + "; " + raw["ID"].fillna("").astype(str)
+        raw["de_clean"].fillna("").astype(str) + "; " + raw["id_clean"].fillna("").astype(str)
     ).map(normalize_semantic_text)
     raw["text_full"] = (
         raw["title_clean"].fillna("").astype(str)
@@ -1122,10 +1131,12 @@ def prepare_train_frame(corpus: str) -> pd.DataFrame:
 stage_banner("LEITURA DOS CORPORA DE TREINO")
 
 domain_frames = []
+domain_frame_map = {}
 audit_rows = []
 for corpus in TRAIN_CORPORA:
     df = prepare_train_frame(corpus)
     domain_frames.append(df)
+    domain_frame_map[corpus] = df
     audit_rows.append(
         {
             "corpus": corpus,
@@ -1150,7 +1161,29 @@ audit_df = pd.DataFrame(audit_rows)
 audit_df.to_csv(ARTIFACTS_DIR / "domain_core_corpus_audit.csv", index=False)
 train_df.to_csv(ARTIFACTS_DIR / "domain_core_training_corpus.csv", index=False)
 
+historical_ab_frames = []
+historical_ab_audit_rows = []
+for corpus in HISTORICAL_AB_EVAL_CORPORA:
+    if corpus in domain_frame_map:
+        eval_df = domain_frame_map[corpus].copy()
+    else:
+        eval_df = prepare_train_frame(corpus)
+    historical_ab_frames.append(eval_df)
+    historical_ab_audit_rows.append(
+        {
+            "corpus": corpus,
+            "rows_usable": int(len(eval_df)),
+            "mean_tokens": round(float(eval_df["text_tokens"].mean()), 2) if len(eval_df) else 0.0,
+        }
+    )
+
+historical_ab_source_df = pd.concat(historical_ab_frames, ignore_index=True)
+historical_ab_source_df = historical_ab_source_df.drop_duplicates(subset=["corpus", "doc_local_id"]).reset_index(drop=True)
+pd.DataFrame(historical_ab_audit_rows).to_csv(ARTIFACTS_DIR / "historical_ab_corpus_audit.csv", index=False)
+historical_ab_source_df.to_csv(ARTIFACTS_DIR / "historical_ab_source_corpus.csv", index=False)
+
 log(f"[load] train_df total={len(train_df)}")
+log(f"[load] historical_ab_source_df total={len(historical_ab_source_df)}")
 display(audit_df)
 display(train_df.head(3))
 '''
@@ -1164,9 +1197,80 @@ SCIBERT_PAIRS = r'''
 stage_banner("MONTAGEM DE INSUMOS DE TREINO")
 
 dapt_texts = train_df["text_full"].dropna().astype(str).unique().tolist()
-pair_df = train_df[["corpus", "doc_local_id", "query_side", "positive_side", "PY", "DI", "SO"]].copy()
+
+
+def build_pairs_for_corpus(df: pd.DataFrame, sample_cap: int | None = None) -> pd.DataFrame:
+    subset = df.dropna(subset=["abstract_clean", "title_clean"]).copy()
+    if sample_cap and len(subset) > sample_cap:
+        subset = subset.sample(sample_cap, random_state=42)
+
+    rows = []
+    for row in subset.itertuples(index=False):
+        abstract_text = str(row.abstract_clean or "").strip()
+        title_text = str(row.title_clean or "").strip()
+        de_text = str(row.de_clean or "").strip()
+        id_text = str(row.id_clean or "").strip()
+
+        if len(title_text) > 10 and len(abstract_text) > 10:
+            rows.append(
+                {
+                    "corpus": row.corpus,
+                    "doc_local_id": row.doc_local_id,
+                    "query_side": title_text,
+                    "positive_side": abstract_text,
+                    "query_origin": "title",
+                    "PY": row.PY,
+                    "DI": row.DI,
+                    "SO": row.SO,
+                }
+            )
+        if len(de_text) > 5 and len(abstract_text) > 10:
+            rows.append(
+                {
+                    "corpus": row.corpus,
+                    "doc_local_id": row.doc_local_id,
+                    "query_side": de_text,
+                    "positive_side": abstract_text,
+                    "query_origin": "de",
+                    "PY": row.PY,
+                    "DI": row.DI,
+                    "SO": row.SO,
+                }
+            )
+        if len(id_text) > 5 and len(abstract_text) > 10:
+            rows.append(
+                {
+                    "corpus": row.corpus,
+                    "doc_local_id": row.doc_local_id,
+                    "query_side": id_text,
+                    "positive_side": abstract_text,
+                    "query_origin": "id",
+                    "PY": row.PY,
+                    "DI": row.DI,
+                    "SO": row.SO,
+                }
+            )
+
+    return pd.DataFrame(rows)
+
+
+pair_parts = []
+pair_audit_rows = []
+for corpus in TRAIN_CORPORA:
+    cap = PAIR_SAMPLE_CAPS.get(corpus)
+    built = build_pairs_for_corpus(domain_frame_map[corpus], sample_cap=cap)
+    pair_parts.append(built)
+    pair_audit_rows.append(
+        {
+            "corpus": corpus,
+            "sample_cap": cap,
+            "pairs_built_raw": int(len(built)),
+        }
+    )
+
+pair_df = pd.concat(pair_parts, ignore_index=True) if pair_parts else pd.DataFrame()
 pair_df = pair_df[
-    pair_df["query_side"].fillna("").astype(str).str.split().str.len().ge(4)
+    pair_df["query_side"].fillna("").astype(str).str.split().str.len().ge(2)
     & pair_df["positive_side"].fillna("").astype(str).str.split().str.len().ge(8)
 ].copy()
 pair_df = pair_df.drop_duplicates(subset=["query_side", "positive_side"]).reset_index(drop=True)
@@ -1181,6 +1285,7 @@ log(f"[pairs] dapt_texts={len(dapt_texts)}")
 log(f"[pairs] contrastive_pairs={len(pair_df)}")
 
 pair_df.to_csv(ARTIFACTS_DIR / "contrastive_pairs.csv", index=False)
+pd.DataFrame(pair_audit_rows).to_csv(ARTIFACTS_DIR / "contrastive_pair_audit.csv", index=False)
 pd.DataFrame(
     [
         {
@@ -1227,20 +1332,9 @@ else:
                 padding="max_length",
             )
 
-        eval_size = min(DAPT_EVAL_DOCS, max(64, int(len(dapt_texts) * 0.05)))
-        if len(dapt_texts) <= eval_size + 32:
-            eval_size = max(32, min(256, len(dapt_texts) // 5))
-
-        if len(dapt_texts) > eval_size + 1:
-            split_ds = raw_ds.train_test_split(test_size=eval_size, seed=42, shuffle=True)
-            train_raw_ds = split_ds["train"]
-            eval_raw_ds = split_ds["test"]
-        else:
-            train_raw_ds = raw_ds
-            eval_raw_ds = raw_ds.select(range(min(len(raw_ds), max(8, eval_size))))
-
-        tokenized_train = train_raw_ds.map(tokenize_batch, batched=True, remove_columns=["text"])
-        tokenized_eval = eval_raw_ds.map(tokenize_batch, batched=True, remove_columns=["text"])
+        eval_size = min(DAPT_EVAL_DOCS, len(dapt_texts))
+        tokenized_train = raw_ds.map(tokenize_batch, batched=True, remove_columns=["text"])
+        tokenized_eval = tokenized_train.select(range(eval_size))
         collator = DataCollatorForLanguageModeling(tokenizer=tokenizer, mlm_probability=0.15)
 
         args = TrainingArguments(
@@ -1273,7 +1367,8 @@ else:
 
         log(
             f"[dapt] iniciando treino MLM | docs={len(dapt_texts)} | "
-            f"train={len(tokenized_train)} | eval={len(tokenized_eval)} | epochs={DAPT_EPOCHS}"
+            f"train={len(tokenized_train)} | eval={len(tokenized_eval)} | "
+            f"eval_mode=paper_compat_subset | epochs={DAPT_EPOCHS}"
         )
         trainer.train()
         metrics = trainer.evaluate()
@@ -1345,7 +1440,15 @@ else:
         raise RuntimeError("RUN_CONTRASTIVE=False e nao existe modelo final pronto.")
 
     base_for_sentence = dapt_base_path if isinstance(dapt_base_path, str) else BASE_MODEL_ID
-    st_model = SentenceTransformer(base_for_sentence, device="cuda" if torch.cuda.is_available() else "cpu")
+    word = models.Transformer(base_for_sentence)
+    pool = models.Pooling(
+        word.get_word_embedding_dimension(),
+        pooling_mode_mean_tokens=True,
+        pooling_mode_cls_token=False,
+        pooling_mode_max_tokens=False,
+    )
+    norm = models.Normalize()
+    st_model = SentenceTransformer(modules=[word, pool, norm], device="cuda" if torch.cuda.is_available() else "cpu")
     st_model.max_seq_length = MAX_SEQ_LEN
 
     pair_examples = [
@@ -1458,7 +1561,7 @@ def tag_with_patterns(text: str, patterns_dict: dict[str, str]) -> str:
     return ";".join(hits)
 
 
-label_df = train_df[["doc_local_id", "corpus", "DI", "PY", "text_full"]].copy()
+label_df = historical_ab_source_df[["doc_local_id", "corpus", "DI", "PY", "text_full"]].copy()
 label_df["Fenomeno"] = label_df["text_full"].map(lambda text: tag_with_patterns(text, fenomeno_patterns))
 label_df["Tarefa"] = label_df["text_full"].map(lambda text: tag_with_patterns(text, tarefa_patterns))
 label_df["Metodo"] = label_df["text_full"].map(lambda text: tag_with_patterns(text, metodo_patterns))
@@ -1543,7 +1646,7 @@ if not RUN_HISTORICAL_AB_EVAL:
         json.dump({"status": "skipped_by_configuration", "run_ts": RUN_TS}, fh, indent=2, ensure_ascii=False)
 else:
     labels_df = pd.read_csv(ARTIFACTS_DIR / "labels_multi_axis.csv")
-    eval_df = train_df.merge(labels_df[["doc_local_id", "primary_tecnica"]], on="doc_local_id", how="left")
+    eval_df = historical_ab_source_df.merge(labels_df[["doc_local_id", "primary_tecnica"]], on="doc_local_id", how="left")
     eval_df["primary_tecnica"] = eval_df["primary_tecnica"].fillna("").astype(str).str.strip()
     eval_df["eval_text"] = eval_df["abstract_clean"].fillna(eval_df["text_full"]).fillna("").astype(str).str.strip()
     eval_df = eval_df[
@@ -1555,47 +1658,8 @@ else:
     keep_labels = label_counts[label_counts >= MIN_TECHNIQUE_LABEL_FREQ].index.tolist()
     eval_df = eval_df[eval_df["primary_tecnica"].isin(keep_labels)].copy()
 
-
-    def stratified_cap(df: pd.DataFrame, label_col: str, max_rows: int, seed: int = 42) -> pd.DataFrame:
-        if len(df) <= max_rows:
-            return df.sample(frac=1.0, random_state=seed).reset_index(drop=True)
-
-        counts = df[label_col].value_counts().sort_index()
-        raw_quotas = counts / counts.sum() * max_rows
-        quotas = np.floor(raw_quotas).astype(int).clip(lower=1)
-        remainder = int(max_rows - quotas.sum())
-
-        if remainder > 0:
-            order = (raw_quotas - np.floor(raw_quotas)).sort_values(ascending=False).index.tolist()
-            idx = 0
-            while remainder > 0 and order:
-                quotas[order[idx % len(order)]] += 1
-                remainder -= 1
-                idx += 1
-        elif remainder < 0:
-            order = quotas.sort_values(ascending=False).index.tolist()
-            idx = 0
-            guard = 0
-            while remainder < 0 and order and guard < 50000:
-                label = order[idx % len(order)]
-                if quotas[label] > 1:
-                    quotas[label] -= 1
-                    remainder += 1
-                idx += 1
-                guard += 1
-
-        parts = []
-        for label, quota in quotas.items():
-            subset = df[df[label_col] == label]
-            take = min(len(subset), int(quota))
-            parts.append(subset.sample(take, random_state=seed))
-
-        out = pd.concat(parts, ignore_index=True)
-        return out.sample(frac=1.0, random_state=seed).reset_index(drop=True)
-
-
     if MAX_AB_EVAL_DOCS:
-        eval_df = stratified_cap(eval_df, "primary_tecnica", MAX_AB_EVAL_DOCS, seed=42)
+        eval_df = eval_df.sample(n=min(MAX_AB_EVAL_DOCS, len(eval_df)), random_state=42).reset_index(drop=True)
 
     if eval_df["primary_tecnica"].nunique() < 2:
         raise RuntimeError(
@@ -1613,7 +1677,15 @@ else:
     device_name = "cuda" if torch.cuda.is_available() else "cpu"
     encode_batch_size = 128 if torch.cuda.is_available() else 32
 
-    model_baseline = SentenceTransformer(BASE_MODEL_ID, device=device_name)
+    base_word = models.Transformer(BASE_MODEL_ID)
+    base_pool = models.Pooling(
+        base_word.get_word_embedding_dimension(),
+        pooling_mode_mean_tokens=True,
+        pooling_mode_cls_token=False,
+        pooling_mode_max_tokens=False,
+    )
+    base_norm = models.Normalize()
+    model_baseline = SentenceTransformer(modules=[base_word, base_pool, base_norm], device=device_name)
     model_ft = SentenceTransformer(str(FINAL_MODEL_DIR), device=device_name)
 
     log(
@@ -1813,7 +1885,13 @@ if not RUN_HF_PUBLISH:
 else:
     from huggingface_hub import login
 
-    token = os.environ.get(HF_TOKEN_ENV, "").strip() or None
+    token = None
+    if str(HF_TOKEN_ENV).startswith("hf_"):
+        token = str(HF_TOKEN_ENV).strip()
+        hf_report["auth_mode"] = "direct_token_config"
+        log("[hf] token direto detectado em HF_TOKEN_ENV. Recomendado migrar para os.environ['HF_TOKEN'].")
+    else:
+        token = os.environ.get(HF_TOKEN_ENV, "").strip() or None
     if not token:
         hf_report["status"] = "skipped_missing_token"
         hf_report["error"] = (
