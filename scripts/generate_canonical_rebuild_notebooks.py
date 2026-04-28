@@ -1204,12 +1204,17 @@ def build_pairs_for_corpus(df: pd.DataFrame, sample_cap: int | None = None) -> p
     if sample_cap and len(subset) > sample_cap:
         subset = subset.sample(sample_cap, random_state=42)
 
+    def safe_text(value) -> str:
+        if pd.isna(value):
+            return ""
+        return str(value).strip()
+
     rows = []
     for row in subset.itertuples(index=False):
-        abstract_text = str(row.abstract_clean or "").strip()
-        title_text = str(row.title_clean or "").strip()
-        de_text = str(row.de_clean or "").strip()
-        id_text = str(row.id_clean or "").strip()
+        abstract_text = safe_text(row.abstract_clean)
+        title_text = safe_text(row.title_clean)
+        de_text = safe_text(row.de_clean)
+        id_text = safe_text(row.id_clean)
 
         if len(title_text) > 10 and len(abstract_text) > 10:
             rows.append(
