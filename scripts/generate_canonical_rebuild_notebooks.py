@@ -856,12 +856,15 @@ Este notebook:
 2. consome os artefatos semanticos do `01_abstract_llm` para auditoria de insumos;
 3. monta o corpus textual de dominio e os pares fracos de contraste;
 4. executa `DAPT` e depois `contrastive fine-tuning`;
-5. salva checkpoints, manifestos, relatorios e artefatos no Google Drive.
+5. calcula as metricas historicas do paper (`perplexity`, `NMI`, `ARI`, `Silhouette`, `MRR`, `Recall@K`, `NearestCentroidAcc`);
+6. publica opcionalmente o modelo atualizado no Hugging Face Hub;
+7. salva checkpoints, manifestos, relatorios e artefatos no Google Drive.
 
 ## Regra metodologica
 
 - `ML_Multimodal` **nao** entra no treino.
 - O treino permanece restrito ao `core`.
+- As metricas paper-facing ficam neste notebook; o incremento do major review continua em `06`, `07` e `08`.
 - O notebook precisa ser acompanhado por prints frequentes e por logs salvos no Drive.
 """
 
@@ -871,10 +874,10 @@ SCIBERT_INSTALL = r'''
 # Instalacao de dependencias para Colab GPU
 # ============================================================
 !pip install -U -q pip setuptools wheel
-!pip install -U -q numpy==2.1.2 scipy==1.14.1 pandas==2.2.2 scikit-learn==1.5.2
+!pip install -U -q numpy==2.0.2 scipy==1.14.1 pandas==2.2.2 scikit-learn==1.5.2 numba==0.60.0
 !pip install -U -q torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu124
-!pip install -U -q transformers==4.45.2 datasets==3.0.1 accelerate==0.34.2 sentence-transformers==2.7.0
-!pip install -U -q pyarrow openpyxl pyreadr faiss-cpu
+!pip install -U -q transformers==4.45.2 datasets==3.0.1 accelerate==0.34.2 sentence-transformers==2.7.0 huggingface_hub==0.25.2
+!pip install -U -q pyarrow openpyxl pyreadr faiss-cpu umap-learn==0.5.6 matplotlib==3.9.2 tabulate==0.9.0
 
 print("Dependencias instaladas.")
 '''
@@ -942,6 +945,7 @@ MAX_SEQ_LEN = 256
 MIN_TOKENS = 16
 MAX_DAPT_DOCS = None
 MAX_CONTRASTIVE_PAIRS = 120000
+DAPT_EVAL_DOCS = 4000
 RUN_DAPT = True
 RUN_CONTRASTIVE = True
 FORCE_RETRAIN = False
@@ -950,6 +954,16 @@ CONTRASTIVE_EPOCHS = 1
 DAPT_BATCH_SIZE = 8
 CONTRASTIVE_BATCH_SIZE = 32
 TOPICS_PER_CORPUS_FOR_AUDIT = 12
+RUN_HISTORICAL_AB_EVAL = True
+MIN_TECHNIQUE_LABEL_FREQ = 40
+MAX_AB_EVAL_DOCS = 16000
+AB_RECALL_KS = (10, 50, 100)
+AB_UMAP_SAMPLE = 5000
+RUN_HF_PUBLISH = False
+HF_REPO_ID = "andreinsardi/SciBERT-SolarPhysics-Search"
+HF_PRIVATE = False
+HF_COMMIT_MESSAGE = "Canonical major-review rebuild update"
+HF_TOKEN_ENV = "HF_TOKEN"
 
 assert PROJECT_ROOT.exists(), f"PROJECT_ROOT nao encontrado: {PROJECT_ROOT}"
 assert DATA_ROOT.exists(), f"DATA_ROOT nao encontrado: {DATA_ROOT}"
@@ -959,6 +973,8 @@ print("TRAIN_CORPORA =", TRAIN_CORPORA)
 print("BASE_MODEL_ID =", BASE_MODEL_ID)
 print("RUN_DAPT =", RUN_DAPT)
 print("RUN_CONTRASTIVE =", RUN_CONTRASTIVE)
+print("RUN_HISTORICAL_AB_EVAL =", RUN_HISTORICAL_AB_EVAL)
+print("RUN_HF_PUBLISH =", RUN_HF_PUBLISH)
 '''
 
 
@@ -1190,6 +1206,13 @@ stage_banner("DAPT - SCIBERT")
 if FINAL_MODEL_DIR.exists() and any(FINAL_MODEL_DIR.iterdir()) and not FORCE_RETRAIN:
     log(f"[dapt] modelo final ja existe em {FINAL_MODEL_DIR}. Reuso sem retreino.")
     dapt_base_path = str(FINAL_MODEL_DIR)
+    dapt_report = {
+        "status": "reused_existing_final_model",
+        "base_path": dapt_base_path,
+        "run_ts": RUN_TS,
+    }
+    with open(REPORTS_DIR / "dapt_eval_metrics.json", "w", encoding="utf-8") as fh:
+        json.dump(dapt_report, fh, indent=2, ensure_ascii=False)
 else:
     if RUN_DAPT:
         raw_ds = Dataset.from_dict({"text": dapt_texts})
@@ -1204,7 +1227,20 @@ else:
                 padding="max_length",
             )
 
-        tokenized_ds = raw_ds.map(tokenize_batch, batched=True, remove_columns=["text"])
+        eval_size = min(DAPT_EVAL_DOCS, max(64, int(len(dapt_texts) * 0.05)))
+        if len(dapt_texts) <= eval_size + 32:
+            eval_size = max(32, min(256, len(dapt_texts) // 5))
+
+        if len(dapt_texts) > eval_size + 1:
+            split_ds = raw_ds.train_test_split(test_size=eval_size, seed=42, shuffle=True)
+            train_raw_ds = split_ds["train"]
+            eval_raw_ds = split_ds["test"]
+        else:
+            train_raw_ds = raw_ds
+            eval_raw_ds = raw_ds.select(range(min(len(raw_ds), max(8, eval_size))))
+
+        tokenized_train = train_raw_ds.map(tokenize_batch, batched=True, remove_columns=["text"])
+        tokenized_eval = eval_raw_ds.map(tokenize_batch, batched=True, remove_columns=["text"])
         collator = DataCollatorForLanguageModeling(tokenizer=tokenizer, mlm_probability=0.15)
 
         args = TrainingArguments(
@@ -1212,9 +1248,17 @@ else:
             overwrite_output_dir=True,
             num_train_epochs=DAPT_EPOCHS,
             per_device_train_batch_size=DAPT_BATCH_SIZE,
+            per_device_eval_batch_size=DAPT_BATCH_SIZE,
             logging_steps=25,
-            save_steps=250,
+            save_strategy="epoch",
             save_total_limit=2,
+            evaluation_strategy="epoch",
+            learning_rate=2e-5,
+            weight_decay=0.01,
+            warmup_ratio=0.1,
+            load_best_model_at_end=True,
+            metric_for_best_model="eval_loss",
+            greater_is_better=False,
             report_to=[],
             fp16=torch.cuda.is_available(),
         )
@@ -1222,21 +1266,66 @@ else:
         trainer = Trainer(
             model=mlm_model,
             args=args,
-            train_dataset=tokenized_ds,
+            train_dataset=tokenized_train,
+            eval_dataset=tokenized_eval,
             data_collator=collator,
         )
 
-        log(f"[dapt] iniciando treino MLM | docs={len(dapt_texts)} | epochs={DAPT_EPOCHS}")
+        log(
+            f"[dapt] iniciando treino MLM | docs={len(dapt_texts)} | "
+            f"train={len(tokenized_train)} | eval={len(tokenized_eval)} | epochs={DAPT_EPOCHS}"
+        )
         trainer.train()
+        metrics = trainer.evaluate()
+        eval_loss = metrics.get("eval_loss")
+        ppl = math.exp(eval_loss) if eval_loss is not None and eval_loss < 20 else None
         trainer.save_model(str(DAPT_DIR))
         tokenizer.save_pretrained(str(DAPT_DIR))
         with open(REPORTS_DIR / "dapt_training_args.json", "w", encoding="utf-8") as fh:
             json.dump(args.to_dict(), fh, indent=2, ensure_ascii=False)
+        with open(REPORTS_DIR / "dapt_eval_metrics.json", "w", encoding="utf-8") as fh:
+            json.dump(
+                {
+                    "eval_loss": eval_loss,
+                    "perplexity": ppl,
+                    "train_docs": len(tokenized_train),
+                    "eval_docs": len(tokenized_eval),
+                    "run_ts": RUN_TS,
+                },
+                fh,
+                indent=2,
+                ensure_ascii=False,
+            )
+        pd.DataFrame(
+            [
+                {
+                    "eval_loss": eval_loss,
+                    "perplexity": ppl,
+                    "train_docs": len(tokenized_train),
+                    "eval_docs": len(tokenized_eval),
+                }
+            ]
+        ).to_csv(REPORTS_DIR / "dapt_eval_summary.csv", index=False)
         dapt_base_path = str(DAPT_DIR)
-        log(f"[dapt] concluido | checkpoint={DAPT_DIR}")
+        log(
+            f"[dapt] concluido | checkpoint={DAPT_DIR} | "
+            f"eval_loss={round(eval_loss, 4) if eval_loss is not None else 'NA'} | "
+            f"perplexity={round(ppl, 4) if ppl is not None else 'NA'}"
+        )
     else:
         dapt_base_path = BASE_MODEL_ID
         log("[dapt] desativado por configuracao. Seguindo direto para o contrastivo.")
+        with open(REPORTS_DIR / "dapt_eval_metrics.json", "w", encoding="utf-8") as fh:
+            json.dump(
+                {
+                    "status": "skipped_by_configuration",
+                    "base_path": dapt_base_path,
+                    "run_ts": RUN_TS,
+                },
+                fh,
+                indent=2,
+                ensure_ascii=False,
+            )
 
 print("Base para o contrastivo =", dapt_base_path)
 '''
@@ -1283,6 +1372,553 @@ else:
     log(f"[contrastive] concluido | final_model={FINAL_MODEL_DIR}")
 
 assert FINAL_MODEL_DIR.exists(), f"Modelo final nao encontrado: {FINAL_MODEL_DIR}"
+'''
+
+
+SCIBERT_HISTORICAL_LABELS = r'''
+# ============================================================
+# Rotulacao fraca multi-eixo para compatibilidade com o paper
+# ============================================================
+
+stage_banner("ROTULACAO FRACA MULTI-EIXO")
+
+fenomeno_patterns = {
+    "solar_flare": r"\bsolar\s+flare(s)?\b|\b(goes[-\s]?(x|m|c)\s*class)\b|\bflare\s+forecast(ing)?\b",
+    "solar_wind": r"\bsolar\s+wind\b|\binterplanetary\s+magnetic\s+field\b|\bimf\b",
+    "magnetic_field_flux": r"\bmagnetic\s+field(s)?\b|\bmagnetic\s+flux\b|\bmagnetogram(s)?\b",
+    "magnetic_reconnection": r"\bmagnetic\s+reconnection\b",
+    "sunspot_active_region": r"\bsunspot(s)?\b|\bactive\s+region(s)?\b|\bar[\s\-]?\d{3,5}\b",
+    "coronal_hole": r"\bcoronal\s+hole(s)?\b",
+    "cme": r"\bcoronal\s+mass\s+ejection(s)?\b|\bcme(s)?\b|\bshock\s+(front|arrival)\b",
+    "corona_heliosphere": r"\bcorona(l)?\b|\bheliosphere\b|\bmagnetosphere\b|\bheliospheric\s+current\s+sheet\b",
+    "mhd_plasma_turbulence": r"\bmhd\b|\bmagnetohydrodynamic(s)?\b|\bplasma\s+turbulence\b|\balfven(\s+wave(s)?)?\b",
+    "plasma_diffusion_transport": r"\b(plasma\s+)?diffusion\b|\btransport\s+process(es)?\b|\badvection[-\s]?diffusion\b",
+    "coronal_loop": r"\bcoronal\s+loop(s)?\b|\bloops?\s+oscillation(s)?\b",
+    "chromosphere_photosphere": r"\bchromosphere\b|\bphotosphere\b|\bquiet\s+sun\b",
+    "solar_energetic_particles": r"\bsolar\s+energetic\s+particle(s)?\b|\bsep(s)?\b",
+    "magnetic_helicity_instability": r"\bmagnetic\s+helicity\b|\b(plasma|magnetic)\s+instabilit(y|ies)\b",
+    "shock_acceleration": r"\bshock\s+(wave|acceleration|front)\b",
+    "coronal_heating": r"\bcoronal\s+heating\b",
+    "plasma_wave_dynamics": r"\bplasma\s+wave(s)?\b|\bwave\s+dissipation\b",
+    "parker_spiral_probe": r"\bparker\s+(spiral|solar\s+probe)\b|\bpsp\b",
+}
+
+tarefa_patterns = {
+    "forecasting": r"\bforecast(ing)?\b|\bnowcast(ing)?\b|\bprediction\b",
+    "classification": r"\bclassification\b|\bclassifier(s)?\b",
+    "detection": r"\bdetection\b|\bdetect(ion|or|ing)?\b",
+    "segmentation": r"\bsegmentation\b",
+    "regression": r"\bregression\b|\binverse\s+problem(s)?\b",
+}
+
+metodo_patterns = {
+    "piml_pinn": r"physics[-\s]?informed|physics[-\s]?guided|theory[-\s]?guided|\bpinn(s)?\b|pde[-\s]?constrained|physics[-\s]?constrained",
+    "governing_equations": r"\b(maxwell|navier[-\s]?stokes|poisson|helmholtz|mhd|advection[-\s]?diffusion)\b\s*(equation|eqs|equations)?",
+    "hybrid_physics_ml": r"\bhybrid\s+(physics|model|approach)\b|\bdata[-\s]?driven\s+and\s+physics[-\s]?based\b",
+    "statistical_bayesian": r"\bbayesian\b|\bstatistical\b",
+}
+
+tecnica_patterns = {
+    "transformer": r"\btransformer(s)?\b|transformer[-\s]*(encoder|decoder)\b|\btransformer[-\s]?based\b",
+    "attention_variants": r"\b(self|cross|multi[-\s]?head)\s*attention\b|\battention\s+mechanism\b|\btemporal\s+fusion\s+transformer\b|\btft\b",
+    "vit_vision_transformer": r"\bvision\s+transformer\b|\bvit\b|\bswin[-\s]?transformer\b",
+    "multimodal_fusion": r"\bmultimodal\b|\bmulti[-\s]?modal\b|\b(data|feature)\s+fusion\b|\bearly\s+fusion\b|\blate\s+fusion\b|\bcross[-\s]?modal\b",
+    "cnn": r"\bcnn(s)?\b|\bconvolutional\s+neural\s+network(s)?\b|\bresnet\b|\befficientnet\b",
+    "lstm_gru_rnn": r"\blstm\b|\bgru\b|\brnn(s)?\b|\brecurrent\s+neural\s+network\b",
+    "gnn_graph": r"\bgnn(s)?\b|\bgraph\s+neural\s+network(s)?\b|\bgraph\s+convolution\b",
+    "svm_rf_xgb": r"\bsvm\b|\bsupport\s+vector\s+machine\b|\brandom\s+forest\b|\bxgboost\b|\bxgb\b",
+    "autoencoder_vae": r"\bautoencoder(s)?\b|\bvariational\s+autoencoder\b|\bvae\b",
+    "ann_dnn_ffn": r"\bartificial\s+neural\s+network(s)?\b|\bdeep\s+neural\s+network(s)?\b|\bfeed[-\s]?forward\s+network(s)?\b",
+    "ensemble_learning": r"\bensemble\s+learning\b|\bmodel\s+ensemble(s)?\b",
+    "multi_task_learning": r"\bmulti[-\s]?task\s+learning\b|\bmulti[-\s]?objective\s+learning\b",
+    "spatio_temporal_transformer": r"\bspatio[-\s]?temporal\s+(transformer|network)\b|\btemporal\s+fusion\s+transformer\b",
+    "dual_encoder": r"\bdual[-\s]?encoder\b|\bbiencoder\b",
+    "gat_graph_attention": r"\bgraph\s+attention\s+network(s)?\b|\bgat\b",
+    "physics_constrained_loss": r"\bphysics[-\s]?constrained\s+loss\b|\bphysical\s+constraint(s)?\b",
+}
+
+dados_patterns = {
+    "magnetogram_hmi": r"\bmagnetogram(s)?\b|\bhmi\b|\bsdo/hmi\b",
+    "aia_imagery": r"\baia\b|\bsdo/aia\b",
+    "goes": r"\bgoes(-\w+)?\b",
+    "rhessi": r"\brhessi\b",
+    "soho_lasco": r"\bsoho\b|\blasco\b",
+    "stereo": r"\bstereo\b",
+    "hinode": r"\bhinode\b",
+    "parker_solar_probe": r"\bparker\s+solar\s+probe\b|\bpsp\b",
+}
+
+
+def tag_with_patterns(text: str, patterns_dict: dict[str, str]) -> str:
+    text = str(text or "")
+    hits = []
+    for label, pattern in patterns_dict.items():
+        if re.search(pattern, text, flags=re.I) and label not in hits:
+            hits.append(label)
+    return ";".join(hits)
+
+
+label_df = train_df[["doc_local_id", "corpus", "DI", "PY", "text_full"]].copy()
+label_df["Fenomeno"] = label_df["text_full"].map(lambda text: tag_with_patterns(text, fenomeno_patterns))
+label_df["Tarefa"] = label_df["text_full"].map(lambda text: tag_with_patterns(text, tarefa_patterns))
+label_df["Metodo"] = label_df["text_full"].map(lambda text: tag_with_patterns(text, metodo_patterns))
+label_df["Tecnica"] = label_df["text_full"].map(lambda text: tag_with_patterns(text, tecnica_patterns))
+label_df["Dados"] = label_df["text_full"].map(lambda text: tag_with_patterns(text, dados_patterns))
+label_df["primary_tecnica"] = label_df["Tecnica"].fillna("").astype(str).str.split(";").str[0].str.strip()
+label_df.to_csv(ARTIFACTS_DIR / "labels_multi_axis.csv", index=False)
+
+coverage_rows = []
+for axis in ["Fenomeno", "Tarefa", "Metodo", "Tecnica", "Dados", "primary_tecnica"]:
+    non_empty = label_df[axis].fillna("").astype(str).str.len().gt(0)
+    coverage_rows.append(
+        {
+            "axis": axis,
+            "coverage_pct": round(float(non_empty.mean() * 100), 2),
+            "non_empty_docs": int(non_empty.sum()),
+            "total_docs": int(len(label_df)),
+        }
+    )
+
+coverage_df = pd.DataFrame(coverage_rows)
+coverage_df.to_csv(ARTIFACTS_DIR / "labels_coverage.csv", index=False)
+
+primary_tecnica_counts = (
+    label_df["primary_tecnica"]
+    .fillna("")
+    .loc[lambda series: series.str.len().gt(0)]
+    .value_counts()
+    .rename_axis("primary_tecnica")
+    .reset_index(name="count")
+)
+primary_tecnica_counts.to_csv(ARTIFACTS_DIR / "primary_tecnica_counts.csv", index=False)
+
+
+def explode_axis(value: str) -> list[str]:
+    parts = [item.strip() for item in str(value or "").split(";")]
+    return [item for item in parts if item]
+
+
+pair_rows = []
+for row in label_df[["Fenomeno", "Tecnica"]].itertuples(index=False):
+    phenomena = explode_axis(row.Fenomeno)
+    techniques = explode_axis(row.Tecnica)
+    for phenomenon in phenomena:
+        for technique in techniques:
+            pair_rows.append((phenomenon, technique))
+
+if pair_rows:
+    pair_df = pd.DataFrame(pair_rows, columns=["Fenomeno", "Tecnica"])
+    fen_tec_df = (
+        pair_df.value_counts()
+        .rename("freq")
+        .reset_index()
+        .sort_values(["freq", "Fenomeno", "Tecnica"], ascending=[False, True, True])
+        .reset_index(drop=True)
+    )
+else:
+    fen_tec_df = pd.DataFrame(columns=["Fenomeno", "Tecnica", "freq"])
+
+fen_tec_df.to_csv(ARTIFACTS_DIR / "fenomeno_x_tecnica.csv", index=False)
+
+log(
+    f"[labels] docs={len(label_df)} | tecnica_coverage="
+    f"{round(float(coverage_df.loc[coverage_df['axis'] == 'Tecnica', 'coverage_pct'].iloc[0]), 2) if len(coverage_df) else 0.0}%"
+)
+display(coverage_df)
+display(primary_tecnica_counts.head(20))
+display(fen_tec_df.head(20))
+'''
+
+
+SCIBERT_HISTORICAL_AB = r'''
+# ============================================================
+# Metricas historicas do paper: baseline vs fine-tuned
+# ============================================================
+
+stage_banner("AVALIACAO HISTORICA PAPER-FACING")
+
+if not RUN_HISTORICAL_AB_EVAL:
+    log("[ab] avaliacao historica desativada por configuracao.")
+    with open(REPORTS_DIR / "historical_ab_eval_summary.json", "w", encoding="utf-8") as fh:
+        json.dump({"status": "skipped_by_configuration", "run_ts": RUN_TS}, fh, indent=2, ensure_ascii=False)
+else:
+    labels_df = pd.read_csv(ARTIFACTS_DIR / "labels_multi_axis.csv")
+    eval_df = train_df.merge(labels_df[["doc_local_id", "primary_tecnica"]], on="doc_local_id", how="left")
+    eval_df["primary_tecnica"] = eval_df["primary_tecnica"].fillna("").astype(str).str.strip()
+    eval_df["eval_text"] = eval_df["abstract_clean"].fillna(eval_df["text_full"]).fillna("").astype(str).str.strip()
+    eval_df = eval_df[
+        eval_df["primary_tecnica"].str.len().gt(0)
+        & eval_df["eval_text"].str.split().str.len().ge(MIN_TOKENS)
+    ].copy()
+
+    label_counts = eval_df["primary_tecnica"].value_counts()
+    keep_labels = label_counts[label_counts >= MIN_TECHNIQUE_LABEL_FREQ].index.tolist()
+    eval_df = eval_df[eval_df["primary_tecnica"].isin(keep_labels)].copy()
+
+
+    def stratified_cap(df: pd.DataFrame, label_col: str, max_rows: int, seed: int = 42) -> pd.DataFrame:
+        if len(df) <= max_rows:
+            return df.sample(frac=1.0, random_state=seed).reset_index(drop=True)
+
+        counts = df[label_col].value_counts().sort_index()
+        raw_quotas = counts / counts.sum() * max_rows
+        quotas = np.floor(raw_quotas).astype(int).clip(lower=1)
+        remainder = int(max_rows - quotas.sum())
+
+        if remainder > 0:
+            order = (raw_quotas - np.floor(raw_quotas)).sort_values(ascending=False).index.tolist()
+            idx = 0
+            while remainder > 0 and order:
+                quotas[order[idx % len(order)]] += 1
+                remainder -= 1
+                idx += 1
+        elif remainder < 0:
+            order = quotas.sort_values(ascending=False).index.tolist()
+            idx = 0
+            guard = 0
+            while remainder < 0 and order and guard < 50000:
+                label = order[idx % len(order)]
+                if quotas[label] > 1:
+                    quotas[label] -= 1
+                    remainder += 1
+                idx += 1
+                guard += 1
+
+        parts = []
+        for label, quota in quotas.items():
+            subset = df[df[label_col] == label]
+            take = min(len(subset), int(quota))
+            parts.append(subset.sample(take, random_state=seed))
+
+        out = pd.concat(parts, ignore_index=True)
+        return out.sample(frac=1.0, random_state=seed).reset_index(drop=True)
+
+
+    if MAX_AB_EVAL_DOCS:
+        eval_df = stratified_cap(eval_df, "primary_tecnica", MAX_AB_EVAL_DOCS, seed=42)
+
+    if eval_df["primary_tecnica"].nunique() < 2:
+        raise RuntimeError(
+            "[ab] menos de duas classes elegiveis de primary_tecnica apos o filtro; "
+            "reduza MIN_TECHNIQUE_LABEL_FREQ ou revise a rotulacao fraca."
+        )
+
+    eval_df.to_csv(ARTIFACTS_DIR / "ab_eval_sample.csv", index=False)
+    pd.DataFrame(
+        [{"primary_tecnica": label, "count": int(count)} for label, count in eval_df["primary_tecnica"].value_counts().items()]
+    ).to_csv(REPORTS_DIR / "ab_eval_primary_tecnica_counts.csv", index=False)
+
+    texts = eval_df["eval_text"].tolist()
+    y_tecnica = eval_df["primary_tecnica"].tolist()
+    device_name = "cuda" if torch.cuda.is_available() else "cpu"
+    encode_batch_size = 128 if torch.cuda.is_available() else 32
+
+    model_baseline = SentenceTransformer(BASE_MODEL_ID, device=device_name)
+    model_ft = SentenceTransformer(str(FINAL_MODEL_DIR), device=device_name)
+
+    log(
+        f"[ab] docs={len(eval_df)} | classes={eval_df['primary_tecnica'].nunique()} | "
+        f"batch_size={encode_batch_size}"
+    )
+    emb_base = model_baseline.encode(
+        texts,
+        normalize_embeddings=True,
+        batch_size=encode_batch_size,
+        show_progress_bar=True,
+        convert_to_numpy=True,
+    )
+    emb_ft = model_ft.encode(
+        texts,
+        normalize_embeddings=True,
+        batch_size=encode_batch_size,
+        show_progress_bar=True,
+        convert_to_numpy=True,
+    )
+
+    from sklearn.cluster import KMeans
+    from sklearn.metrics import accuracy_score, adjusted_rand_score, normalized_mutual_info_score, silhouette_score
+    from sklearn.preprocessing import LabelEncoder
+    import matplotlib.pyplot as plt
+    import umap
+
+    label_encoder = LabelEncoder()
+    y_true = label_encoder.fit_transform(y_tecnica)
+    k_eval = len(label_encoder.classes_)
+
+
+    def eval_clustering_metrics(embs: np.ndarray, y_true_labels: np.ndarray, model_name: str) -> dict:
+        km = KMeans(n_clusters=k_eval, n_init=10, random_state=42)
+        y_pred = km.fit_predict(embs)
+        sil = float("nan")
+        sample_size = min(5000, len(embs))
+        if sample_size >= 10 and len(np.unique(y_pred[:sample_size])) > 1:
+            sil = float(silhouette_score(embs[:sample_size], y_pred[:sample_size], metric="cosine"))
+        return {
+            "model": model_name,
+            "k": int(k_eval),
+            "NMI": float(normalized_mutual_info_score(y_true_labels, y_pred)),
+            "ARI": float(adjusted_rand_score(y_true_labels, y_pred)),
+            "Silhouette": sil,
+        }
+
+
+    def build_cosine_index(embs: np.ndarray):
+        matrix = np.asarray(embs, dtype="float32").copy()
+        faiss.normalize_L2(matrix)
+        index = faiss.IndexFlatIP(matrix.shape[1])
+        index.add(matrix)
+        return index
+
+
+    def eval_retrieval_metrics(embs: np.ndarray, labels: list[str], ks: tuple[int, ...]) -> dict:
+        matrix = np.asarray(embs, dtype="float32")
+        index = build_cosine_index(matrix)
+        _, neighbors = index.search(matrix, max(ks) + 1)
+        neighbors = neighbors[:, 1:]
+        label_arr = np.asarray(labels)
+        rr_values = []
+        recalls = {k: [] for k in ks}
+        for idx in range(len(label_arr)):
+            target = label_arr[idx]
+            hits = label_arr[neighbors[idx]] == target
+            hit_positions = np.where(hits)[0]
+            rr_values.append(float(1.0 / (hit_positions[0] + 1)) if len(hit_positions) else 0.0)
+            for k in ks:
+                recalls[k].append(float(hits[:k].any()))
+        out = {"MRR": float(np.mean(rr_values))}
+        for k in ks:
+            out[f"Recall@{k}"] = float(np.mean(recalls[k]))
+        return out
+
+
+    def nearest_centroid_accuracy(embs: np.ndarray, labels: list[str]) -> float:
+        labels_arr = np.asarray(labels)
+        classes = np.unique(labels_arr)
+        centroids = np.vstack([embs[labels_arr == cls].mean(axis=0) for cls in classes]).astype("float32")
+        embs_norm = np.asarray(embs, dtype="float32")
+        embs_norm = embs_norm / np.linalg.norm(embs_norm, axis=1, keepdims=True)
+        cent_norm = centroids / np.linalg.norm(centroids, axis=1, keepdims=True)
+        sims = embs_norm @ cent_norm.T
+        pred = classes[np.argmax(sims, axis=1)]
+        return float(accuracy_score(labels_arr, pred))
+
+
+    df_clu = pd.DataFrame(
+        [
+            eval_clustering_metrics(emb_base, y_true, "SciBERT-baseline"),
+            eval_clustering_metrics(emb_ft, y_true, "SciBERT-SolarPhysics-Search"),
+        ]
+    )
+    df_clu.to_csv(REPORTS_DIR / "eval_clustering_tecnica.csv", index=False)
+
+    df_ret = pd.DataFrame(
+        [
+            {"model": "SciBERT-baseline", **eval_retrieval_metrics(emb_base, y_tecnica, AB_RECALL_KS)},
+            {"model": "SciBERT-SolarPhysics-Search", **eval_retrieval_metrics(emb_ft, y_tecnica, AB_RECALL_KS)},
+        ]
+    )
+    df_ret.to_csv(REPORTS_DIR / "eval_retrieval_tecnica.csv", index=False)
+
+    df_nc = pd.DataFrame(
+        [
+            {"model": "SciBERT-baseline", "NearestCentroidAcc": nearest_centroid_accuracy(emb_base, y_tecnica)},
+            {"model": "SciBERT-SolarPhysics-Search", "NearestCentroidAcc": nearest_centroid_accuracy(emb_ft, y_tecnica)},
+        ]
+    )
+    df_nc.to_csv(REPORTS_DIR / "eval_nearest_centroid.csv", index=False)
+
+    fig_path = REPORTS_DIR / "umap_baseline_vs_ft.png"
+    umap_take = min(AB_UMAP_SAMPLE, len(eval_df))
+    if umap_take >= 10:
+        rng = np.random.default_rng(42)
+        plot_idx = np.sort(rng.choice(len(eval_df), size=umap_take, replace=False))
+        umap_base = umap.UMAP(n_neighbors=30, min_dist=0.1, metric="cosine", random_state=42).fit_transform(emb_base[plot_idx])
+        umap_ft = umap.UMAP(n_neighbors=30, min_dist=0.1, metric="cosine", random_state=42).fit_transform(emb_ft[plot_idx])
+
+        fig, axes = plt.subplots(1, 2, figsize=(13, 6))
+        axes[0].scatter(umap_base[:, 0], umap_base[:, 1], s=5, alpha=0.65)
+        axes[0].set_title("SciBERT baseline - UMAP")
+        axes[0].set_xlabel("UMAP-1")
+        axes[0].set_ylabel("UMAP-2")
+
+        axes[1].scatter(umap_ft[:, 0], umap_ft[:, 1], s=5, alpha=0.65, color="tab:blue")
+        axes[1].set_title("SciBERT-SolarPhysics-Search - UMAP")
+        axes[1].set_xlabel("UMAP-1")
+        axes[1].set_ylabel("UMAP-2")
+
+        plt.tight_layout()
+        plt.savefig(fig_path, dpi=160)
+        plt.close(fig)
+        log(f"[ab] figura UMAP salva em {fig_path}")
+    else:
+        log("[ab] amostra insuficiente para UMAP; figura nao gerada.")
+
+    report_path = REPORTS_DIR / "AB_experimento_baseline_vs_finetuned.md"
+    with open(report_path, "w", encoding="utf-8") as fh:
+        fh.write("# Experimento A/B - SciBERT (baseline) vs SciBERT-SolarPhysics-Search\n\n")
+        fh.write(f"- docs avaliados: {len(eval_df)}\n")
+        fh.write(f"- classes de tecnica: {eval_df['primary_tecnica'].nunique()}\n")
+        fh.write(f"- corpus de treino: {', '.join(TRAIN_CORPORA)}\n\n")
+        fh.write("## Clusterizacao (Tecnica)\n")
+        fh.write(df_clu.to_markdown(index=False))
+        fh.write("\n\n## Retrieval por classe (Tecnica)\n")
+        fh.write(df_ret.to_markdown(index=False))
+        fh.write("\n\n## Acuracia por centroide\n")
+        fh.write(df_nc.to_markdown(index=False))
+        fh.write("\n")
+        if fig_path.exists():
+            fh.write("\n## Figura UMAP\n")
+            fh.write(f"![UMAP]({fig_path.name})\n")
+
+    ab_summary = {
+        "status": "completed",
+        "eval_docs": int(len(eval_df)),
+        "eval_classes": int(eval_df["primary_tecnica"].nunique()),
+        "min_technique_label_freq": int(MIN_TECHNIQUE_LABEL_FREQ),
+        "max_ab_eval_docs": int(MAX_AB_EVAL_DOCS) if MAX_AB_EVAL_DOCS else None,
+        "umap_generated": bool(fig_path.exists()),
+        "run_ts": RUN_TS,
+    }
+    with open(REPORTS_DIR / "historical_ab_eval_summary.json", "w", encoding="utf-8") as fh:
+        json.dump(ab_summary, fh, indent=2, ensure_ascii=False)
+
+    log(
+        f"[ab] concluido | docs={len(eval_df)} | classes={eval_df['primary_tecnica'].nunique()} | "
+        f"report={report_path}"
+    )
+    display(df_clu)
+    display(df_ret)
+    display(df_nc)
+'''
+
+
+SCIBERT_PUBLISH = r'''
+# ============================================================
+# Publicacao opcional do modelo no Hugging Face Hub
+# ============================================================
+
+stage_banner("PUBLICACAO OPCIONAL NO HUGGING FACE")
+
+hf_report = {
+    "run_hf_publish": bool(RUN_HF_PUBLISH),
+    "hf_repo_id": HF_REPO_ID,
+    "hf_private": bool(HF_PRIVATE),
+    "status": "not_started",
+    "run_ts": RUN_TS,
+}
+
+if not RUN_HF_PUBLISH:
+    hf_report["status"] = "skipped_by_configuration"
+    log("[hf] publicacao desativada por configuracao.")
+else:
+    from huggingface_hub import login
+
+    token = os.environ.get(HF_TOKEN_ENV, "").strip() or None
+    if token:
+        login(token=token, add_to_git_credential=False)
+        hf_report["auth_mode"] = "env_token"
+        log(f"[hf] autenticado via variavel de ambiente {HF_TOKEN_ENV}.")
+    else:
+        log(f"[hf] {HF_TOKEN_ENV} ausente. Sera solicitado login interativo no Colab.")
+        login()
+        hf_report["auth_mode"] = "interactive_login"
+
+    retrieval_path = REPORTS_DIR / "eval_retrieval_tecnica.csv"
+    clustering_path = REPORTS_DIR / "eval_clustering_tecnica.csv"
+    nearest_centroid_path = REPORTS_DIR / "eval_nearest_centroid.csv"
+    dapt_metrics_path = REPORTS_DIR / "dapt_eval_metrics.json"
+
+    model_card_lines = [
+        "---",
+        "license: apache-2.0",
+        "library_name: sentence-transformers",
+        f"base_model: {BASE_MODEL_ID}",
+        "tags:",
+        "- solar-physics",
+        "- scientific-retrieval",
+        "- sentence-transformers",
+        "- scibert",
+        "- major-review-rebuild",
+        "---",
+        "",
+        "# SciBERT-SolarPhysics-Search",
+        "",
+        "Modelo canonico reconstruido para o major review, treinado somente em `Nucleo_core`, `PIML_core` e `CombFinal_core`.",
+        "",
+        "## Metodo",
+        "",
+        "- `DAPT` (MLM) sobre o corpus de dominio do `core`.",
+        "- Fine-tuning contrastivo com `query_side -> positive_side`.",
+        "- Sem uso de `ML_Multimodal` no treino.",
+        "",
+        "## Compatibilidade com o paper",
+        "",
+        "- O notebook 05 calcula `perplexity`, `NMI`, `ARI`, `Silhouette`, `MRR`, `Recall@K` e `NearestCentroidAcc`.",
+        "- Os notebooks 06 a 08 calculam o incremento aprovado do major review (`SciBERT generic`, `BM25`, core vs holdout, bootstrap CIs e auditoria final).",
+        "",
+    ]
+
+    if dapt_metrics_path.exists():
+        dapt_metrics = json.loads(dapt_metrics_path.read_text(encoding="utf-8"))
+        model_card_lines.extend(
+            [
+                "## DAPT",
+                "",
+                f"- eval_loss: {dapt_metrics.get('eval_loss')}",
+                f"- perplexity: {dapt_metrics.get('perplexity')}",
+                "",
+            ]
+        )
+
+    if retrieval_path.exists():
+        model_card_lines.extend(
+            [
+                "## Retrieval por classe (Tecnica)",
+                "",
+                pd.read_csv(retrieval_path).to_markdown(index=False),
+                "",
+            ]
+        )
+
+    if clustering_path.exists():
+        model_card_lines.extend(
+            [
+                "## Clusterizacao (Tecnica)",
+                "",
+                pd.read_csv(clustering_path).to_markdown(index=False),
+                "",
+            ]
+        )
+
+    if nearest_centroid_path.exists():
+        model_card_lines.extend(
+            [
+                "## Separabilidade por centroide",
+                "",
+                pd.read_csv(nearest_centroid_path).to_markdown(index=False),
+                "",
+            ]
+        )
+
+    (FINAL_MODEL_DIR / "README.md").write_text("\n".join(model_card_lines), encoding="utf-8")
+
+    publish_model = SentenceTransformer(str(FINAL_MODEL_DIR), device="cuda" if torch.cuda.is_available() else "cpu")
+    push_result = publish_model.push_to_hub(
+        HF_REPO_ID,
+        token=token,
+        private=HF_PRIVATE,
+        commit_message=HF_COMMIT_MESSAGE,
+        exist_ok=True,
+        replace_model_card=True,
+    )
+    hf_report["status"] = "published"
+    hf_report["push_result"] = push_result
+    log(f"[hf] publicacao concluida em {HF_REPO_ID}")
+
+with open(REPORTS_DIR / "hf_publish_report.json", "w", encoding="utf-8") as fh:
+    json.dump(hf_report, fh, indent=2, ensure_ascii=False)
+
+display(pd.DataFrame([hf_report]))
 '''
 
 
@@ -1352,6 +1988,9 @@ training_manifest = {
     "base_model_id": BASE_MODEL_ID,
     "run_dapt": RUN_DAPT,
     "run_contrastive": RUN_CONTRASTIVE,
+    "run_historical_ab_eval": RUN_HISTORICAL_AB_EVAL,
+    "run_hf_publish": RUN_HF_PUBLISH,
+    "hf_repo_id": HF_REPO_ID,
     "run_ts": RUN_TS,
 }
 with open(REPORTS_DIR / "training_manifest.json", "w", encoding="utf-8") as fh:
@@ -2601,6 +3240,9 @@ def build_scibert_notebook() -> tuple[Path, list[dict]]:
         code_cell(SCIBERT_PAIRS),
         code_cell(SCIBERT_DAPT),
         code_cell(SCIBERT_CONTRASTIVE),
+        code_cell(SCIBERT_HISTORICAL_LABELS),
+        code_cell(SCIBERT_HISTORICAL_AB),
+        code_cell(SCIBERT_PUBLISH),
         code_cell(SCIBERT_EXPORT),
     ]
     return NOTEBOOK_ROOT / "05_scibert_solarphysics_search_rebuild.ipynb", cells
