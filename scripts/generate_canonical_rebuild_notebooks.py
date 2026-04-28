@@ -1098,6 +1098,39 @@ def ensure_expected_cols(df: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
+def concat_alias(corpus: str) -> str:
+    mapping = {
+        "Nucleo": "nucleo",
+        "PIML": "piml",
+        "CombFinal": "combf",
+        "ML_Multimodal": "ml",
+    }
+    if corpus not in mapping:
+        raise KeyError(f"Corpus sem alias concat conhecido: {corpus}")
+    return mapping[corpus]
+
+
+def build_concat_export_df(df: pd.DataFrame) -> pd.DataFrame:
+    out = pd.DataFrame(
+        {
+            "corpus": df["corpus"],
+            "doc_local_id": df["doc_local_id"],
+            "TI": df["title_clean"],
+            "AB": df["abstract_clean"],
+            "DE": df["de_clean"],
+            "ID": df["id_clean"],
+            "SO": df["SO"],
+            "PY": df["PY"],
+            "TC": df["TC"],
+            "DI": df["DI"],
+            "text_full": df["text_full"],
+        }
+    )
+    for col in ["TI", "AB", "DE", "ID", "SO", "PY", "TC", "DI", "text_full"]:
+        out[col] = out[col].fillna("").astype(str)
+    return out
+
+
 def prepare_train_frame(corpus: str) -> pd.DataFrame:
     csv_path = read_consol_csv(corpus)
     assert csv_path.exists(), f"Input nao encontrado: {csv_path}"
@@ -1140,11 +1173,15 @@ stage_banner("LEITURA DOS CORPORA DE TREINO")
 
 domain_frames = []
 domain_frame_map = {}
+concat_frame_map = {}
 audit_rows = []
 for corpus in TRAIN_CORPORA:
     df = prepare_train_frame(corpus)
     domain_frames.append(df)
     domain_frame_map[corpus] = df
+    concat_frame = build_concat_export_df(df)
+    concat_frame_map[corpus] = concat_frame
+    concat_frame.to_csv(ARTIFACTS_DIR / f"concat_{concat_alias(corpus)}.csv", index=False)
     audit_rows.append(
         {
             "corpus": corpus,
@@ -1171,12 +1208,17 @@ train_df.to_csv(ARTIFACTS_DIR / "domain_core_training_corpus.csv", index=False)
 
 historical_ab_frames = []
 historical_ab_audit_rows = []
+historical_ab_concat_frames = []
 for corpus in HISTORICAL_AB_EVAL_CORPORA:
     if corpus in domain_frame_map:
         eval_df = domain_frame_map[corpus].copy()
+        concat_eval_df = concat_frame_map[corpus].copy()
     else:
         eval_df = prepare_train_frame(corpus)
+        concat_eval_df = build_concat_export_df(eval_df)
+        concat_eval_df.to_csv(ARTIFACTS_DIR / f"concat_{concat_alias(corpus)}.csv", index=False)
     historical_ab_frames.append(eval_df)
+    historical_ab_concat_frames.append(concat_eval_df)
     historical_ab_audit_rows.append(
         {
             "corpus": corpus,
@@ -1187,11 +1229,15 @@ for corpus in HISTORICAL_AB_EVAL_CORPORA:
 
 historical_ab_source_df = pd.concat(historical_ab_frames, ignore_index=True)
 historical_ab_source_df = historical_ab_source_df.drop_duplicates(subset=["corpus", "doc_local_id"]).reset_index(drop=True)
+historical_ab_concat_df = pd.concat(historical_ab_concat_frames, ignore_index=True)
+historical_ab_concat_df = historical_ab_concat_df.drop_duplicates(subset=["corpus", "doc_local_id"]).reset_index(drop=True)
 pd.DataFrame(historical_ab_audit_rows).to_csv(ARTIFACTS_DIR / "historical_ab_corpus_audit.csv", index=False)
 historical_ab_source_df.to_csv(ARTIFACTS_DIR / "historical_ab_source_corpus.csv", index=False)
+historical_ab_concat_df.to_csv(ARTIFACTS_DIR / "historical_ab_concat_corpus.csv", index=False)
 
 log(f"[load] train_df total={len(train_df)}")
 log(f"[load] historical_ab_source_df total={len(historical_ab_source_df)}")
+log(f"[load] historical_ab_concat_df total={len(historical_ab_concat_df)}")
 display(audit_df)
 display(train_df.head(3))
 '''
@@ -1597,7 +1643,10 @@ def tag_with_patterns(text: str, patterns_dict: dict[str, str]) -> str:
     return ";".join(hits)
 
 
-label_base_df = historical_ab_source_df[["doc_local_id", "corpus", "DI", "PY", "TI", "AB", "DE", "ID"]].copy()
+label_base_df = pd.concat(
+    [concat_frame_map[corpus].copy() for corpus in TRAIN_CORPORA],
+    ignore_index=True,
+)
 for col in ["TI", "AB", "DE", "ID"]:
     label_base_df[col] = label_base_df[col].map(strong_clean)
 label_base_df["label_text_full"] = (
@@ -1698,14 +1747,14 @@ else:
     labels_df = pd.read_csv(ARTIFACTS_DIR / "labels_multi_axis.csv")
     labels_lookup = labels_df.drop(columns=["DI"], errors="ignore")
     labels_lookup = labels_lookup.rename(columns={"DOI": "DI"}).drop_duplicates(subset=["DI"], keep="first")
-    eval_df = historical_ab_source_df.merge(labels_lookup[["DI", "Tecnica"]], on="DI", how="left")
+    eval_source_df = historical_ab_concat_df.copy()
+    eval_df = eval_source_df.merge(labels_lookup[["DI", "Tecnica"]], on="DI", how="left")
     eval_df["Tecnica_clean"] = eval_df["Tecnica"].fillna("").astype(str).str.split(";").str[0].str.strip()
-    eval_df["eval_text"] = (
-        eval_df["abstract_clean"].where(eval_df["abstract_clean"].notna(), eval_df["text_full"])
-        .fillna("")
-        .astype(str)
-        .str.strip()
-    )
+    txt_col = "AB" if "AB" in eval_df.columns else ("text_full" if "text_full" in eval_df.columns else None)
+    if txt_col is None:
+        eval_df["text_full"] = eval_df.astype(str).agg(" ".join, axis=1)
+        txt_col = "text_full"
+    eval_df["eval_text"] = eval_df[txt_col].fillna("").astype(str).str.strip()
     eval_df = eval_df[eval_df["Tecnica_clean"].str.len().gt(0)].copy()
 
     if MIN_TECHNIQUE_LABEL_FREQ and int(MIN_TECHNIQUE_LABEL_FREQ) > 1:
@@ -1714,7 +1763,10 @@ else:
         eval_df = eval_df[eval_df["Tecnica_clean"].isin(keep_labels)].copy()
 
     if MAX_AB_EVAL_DOCS:
-        eval_df = eval_df.sample(n=min(MAX_AB_EVAL_DOCS, len(eval_df)), random_state=42).reset_index(drop=True)
+        sample_n = min(MAX_AB_EVAL_DOCS, len(eval_df))
+        rng = np.random.default_rng(42)
+        sample_idx = rng.choice(eval_df.index.to_numpy(), size=sample_n, replace=False)
+        eval_df = eval_df.loc[sample_idx].reset_index(drop=True)
 
     if eval_df["Tecnica_clean"].nunique() < 2:
         raise RuntimeError(
