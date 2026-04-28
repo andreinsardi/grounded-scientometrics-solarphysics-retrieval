@@ -2224,8 +2224,16 @@ PIPE2_INSTALL = r'''
 # Instalacao de dependencias para Colab
 # ============================================================
 !pip install -U -q pip setuptools wheel
-!pip install -U -q numpy==2.1.2 scipy==1.14.1 pandas==2.2.2 scikit-learn==1.5.2
-!pip install -U -q faiss-cpu sentence-transformers==2.7.0 transformers==4.45.2 pyarrow openpyxl
+!pip uninstall -y -q numpy scipy scikit-learn sentence-transformers transformers faiss-cpu numba umap-learn hdbscan || true
+!pip install -U -q numpy==2.0.2 scipy==1.14.1 pandas==2.2.2 scikit-learn==1.6.1 numba==0.60.0 openpyxl pyarrow jedi==0.19.2
+!pip install -U -q faiss-cpu sentence-transformers==2.7.0 transformers==4.45.2
+
+import numpy, scipy, sklearn, sentence_transformers, transformers
+print("numpy            :", numpy.__version__)
+print("scipy            :", scipy.__version__)
+print("scikit-learn     :", sklearn.__version__)
+print("sentence-transformers:", sentence_transformers.__version__)
+print("transformers     :", transformers.__version__)
 
 print("Dependencias instaladas.")
 '''
@@ -2726,9 +2734,17 @@ PIPE3_INSTALL = r'''
 # Instalacao de dependencias para Colab
 # ============================================================
 !pip install -U -q pip setuptools wheel
-!pip install -U -q numpy==2.1.2 scipy==1.14.1 pandas==2.2.2 scikit-learn==1.5.2
+!pip uninstall -y -q numpy scipy scikit-learn sentence-transformers transformers faiss-cpu numba umap-learn hdbscan || true
+!pip install -U -q numpy==2.0.2 scipy==1.14.1 pandas==2.2.2 scikit-learn==1.6.1 numba==0.60.0 openpyxl pyarrow jedi==0.19.2
 !pip install -U -q faiss-cpu sentence-transformers==2.7.0 transformers==4.45.2 rank-bm25==0.2.2
-!pip install -U -q openai==1.* pydantic openpyxl
+!pip install -U -q openai==1.* pydantic
+
+import numpy, scipy, sklearn, sentence_transformers, transformers
+print("numpy            :", numpy.__version__)
+print("scipy            :", scipy.__version__)
+print("scikit-learn     :", sklearn.__version__)
+print("sentence-transformers:", sentence_transformers.__version__)
+print("transformers     :", transformers.__version__)
 
 print("Dependencias instaladas.")
 '''
@@ -3111,7 +3127,14 @@ PIPE4_INSTALL = r'''
 # Instalacao de dependencias para Colab
 # ============================================================
 !pip install -U -q pip setuptools wheel
-!pip install -U -q numpy==2.1.2 scipy==1.14.1 pandas==2.2.2 openpyxl
+!pip uninstall -y -q numpy scipy scikit-learn sentence-transformers transformers faiss-cpu numba umap-learn hdbscan || true
+!pip install -U -q numpy==2.0.2 scipy==1.14.1 pandas==2.2.2 scikit-learn==1.6.1 openpyxl pyarrow jedi==0.19.2
+
+import numpy, scipy, pandas, sklearn
+print("numpy            :", numpy.__version__)
+print("scipy            :", scipy.__version__)
+print("pandas           :", pandas.__version__)
+print("scikit-learn     :", sklearn.__version__)
 
 print("Dependencias instaladas.")
 '''
