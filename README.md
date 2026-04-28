@@ -1,102 +1,45 @@
-# SciBERT-SolarPhysics-Search — Reproducible Notebooks (PIPE 1–4)
+# Grounded Scientometrics Solar Physics Retrieval
 
-This repository contains **four end-to-end Jupyter notebooks** reproducing the experimental pipeline:
+Rebuild controlado do pipeline do artigo de Scientometrics sobre retrieval especializado em Solar Physics.
 
-- **PIPE 1**: **Train & package** `SciBERT-SolarPhysics-Search` (DAPT + supervised contrastive FT) and **build the FAISS index**
-- **PIPE 2**: Retriever analytics (coverage / alignment / connectivity diagnostics)
-- **PIPE 3**: Grounded LLM agent experiment (A1–A4), exporting claim-level metrics (ICR/UCR)
-- **PIPE 4**: Statistical validation and robustness checks
+Este repositorio foi reiniciado para concentrar apenas:
 
-Hugging Face model (published):
-- `andreinsardi/SciBERT-SolarPhysics-Search`
+- notebooks novos do rebuild;
+- documentacao tecnica do rebuild;
+- convencoes de entrada e saida;
+- artefatos leves de apoio ao desenvolvimento.
 
-> No service keys are committed. Use `.env` / environment variables.
+O objetivo nao e reinventar o metodo. O objetivo e reconstruir o pipeline do zero, mantendo comparabilidade com a versao submetida do paper.
 
----
+## Regras do projeto
 
-## Suggested repository name
+- Preservar o metodo historico sempre que possivel.
+- Melhorar o pipeline sem eliminar regras antigas.
+- Tratar `01_historico_bruto_disponivel` e `03_complemento_bruto_2025-09_2026-03` como entradas reais.
+- Tratar `02_historico_consolidado` como referencia de auditoria e comparacao.
+- Separar sempre `core` e `holdout`.
+- Replicar no `core` a familia de aplicacoes do artigo original.
+- Espelhar essa mesma familia de aplicacoes no `holdout` sempre que isso nao implicar treino ou tuning com dados futuros.
+- Manter o treino do retriever especializado exclusivo do `core`.
+- Nao commitar outputs pesados do processamento neste repositorio.
 
-- `scibert-solarphysics-search-pipelines`
+## Janela temporal congelada
 
----
+- `core`: `2020-01-01` a `2025-09-30`
+- `holdout`: `2025-10-01` a `2026-03-31`
 
-## Structure
+## Estrutura inicial
 
-```
-.
-├── notebooks/
-│   ├── 01_PIPE1_Train_Model_And_Build_Index.ipynb
-│   ├── 02_PIPE2_Retriever_Analytics.ipynb
-│   ├── 03_PIPE3_Agent_Scientometrics.ipynb
-│   └── 04_PIPE4_Statistical_Validation.ipynb
-├── data/
-│   ├── corpus.parquet            # required for PIPE 1 (or set CORPUS_PATH)
-│   └── pairs.jsonl               # optional supervised pairs for contrastive FT
-├── artifacts/
-│   ├── pipe1/
-│   │   ├── model/
-│   │   └── embeddings/
-│   └── retriever/
-│       ├── faiss.index
-│       └── docs.parquet
-├── runs/
-│   └── (exported logs/metrics)
-├── .env.example
-├── requirements.txt
-└── README.md
-```
+- [docs](C:/Users/andre/odrive/Google%20Drive/Unicamp/artigo%20bibliometria/grounded-scientometrics-solarphysics-retrieval/docs)
+- [notebooks](C:/Users/andre/odrive/Google%20Drive/Unicamp/artigo%20bibliometria/grounded-scientometrics-solarphysics-retrieval/notebooks)
+- [scripts](C:/Users/andre/odrive/Google%20Drive/Unicamp/artigo%20bibliometria/grounded-scientometrics-solarphysics-retrieval/scripts)
+- [config](C:/Users/andre/odrive/Google%20Drive/Unicamp/artigo%20bibliometria/grounded-scientometrics-solarphysics-retrieval/config)
 
----
+## Ordem de trabalho
 
-## Environment
-
-```bash
-python -m venv .venv
-source .venv/bin/activate   # Windows: .venv\Scripts\activate
-pip install -U pip
-pip install -r requirements.txt
-```
-
----
-
-## Configuration
-
-Copy `.env.example` to `.env` and edit values.
-
----
-
-## Run order
-
-1. `01_PIPE1_Train_Model_And_Build_Index.ipynb`
-2. `02_PIPE2_Retriever_Analytics.ipynb`
-3. `03_PIPE3_Agent_Scientometrics.ipynb`
-4. `04_PIPE4_Statistical_Validation.ipynb`
-
----
-
-## GPU usage
-
-Install a CUDA-enabled PyTorch build matching your CUDA version.
-
-Example (CUDA 12.1):
-```bash
-pip install --index-url https://download.pytorch.org/whl/cu121 torch torchvision torchaudio
-```
-
-Verify GPU:
-```bash
-python -c "import torch; print(torch.cuda.is_available()); print(torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'CPU')"
-```
-
-Performance knobs:
-- `EMB_BATCH`: increase until VRAM limit.
-- `MAX_LENGTH_*`: reduce if you see OOM.
-
----
-
-## Reproducibility notes
-
-- Outputs are not committed; notebooks export into `artifacts/` and `runs/`.
-- PIPE 3 requires your own LLM API key via env var if you run generation.
-
----
+1. Construir o notebook de consolidacao e deduplicacao.
+2. Reconstruir as bases `core` e `holdout`.
+3. Recriar os notebooks `Abstract_LLM_*` para `core` e `holdout`.
+4. Recriar o treino do `SciBERT_SolarPhysics_Search` apenas no `core`.
+5. Recriar os pipes 2, 3 e 4 para replicacao no `core` e espelhamento temporal no `holdout`.
+6. So depois reescrever o artigo.

@@ -1,0 +1,9 @@
+.ipynb_checkpoints/
+__pycache__/
+*.pyc
+*.tmp
+*.log
+outputs/
+artifacts/
+tmp/
+data_local/
