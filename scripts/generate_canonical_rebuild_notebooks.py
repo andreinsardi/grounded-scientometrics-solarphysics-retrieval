@@ -249,6 +249,7 @@ def log(message: str) -> None:
     prefix = f"[{now} | +{fmt_seconds(elapsed_seconds())}]"
     line = f"{prefix} {message}"
     print(line, flush=True)
+    GLOBAL_LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
     with open(GLOBAL_LOG_FILE, "a", encoding="utf-8") as fh:
         fh.write(line + "\n")
 
@@ -1025,6 +1026,7 @@ def log(message: str) -> None:
     prefix = f"[{now} | +{fmt_seconds(elapsed_seconds())}]"
     line = f"{prefix} {message}"
     print(line, flush=True)
+    GLOBAL_LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
     with open(GLOBAL_LOG_FILE, "a", encoding="utf-8") as fh:
         fh.write(line + "\n")
 
@@ -2241,6 +2243,7 @@ def log(message: str) -> None:
     prefix = f"[{now} | +{fmt_seconds(elapsed_seconds())}]"
     line = f"{prefix} {message}"
     print(line, flush=True)
+    GLOBAL_LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
     with open(GLOBAL_LOG_FILE, "a", encoding="utf-8") as fh:
         fh.write(line + "\n")
 
@@ -2725,6 +2728,7 @@ def log(message: str) -> None:
     prefix = f"[{now} | +{fmt_seconds(elapsed_seconds())}]"
     line = f"{prefix} {message}"
     print(line, flush=True)
+    GLOBAL_LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
     with open(GLOBAL_LOG_FILE, "a", encoding="utf-8") as fh:
         fh.write(line + "\n")
 
@@ -3096,6 +3100,7 @@ def log(message: str) -> None:
     prefix = f"[{now} | +{fmt_seconds(elapsed_seconds())}]"
     line = f"{prefix} {message}"
     print(line, flush=True)
+    GLOBAL_LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
     with open(GLOBAL_LOG_FILE, "a", encoding="utf-8") as fh:
         fh.write(line + "\n")
 
