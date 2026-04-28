@@ -956,7 +956,7 @@ DAPT_BATCH_SIZE = 16
 CONTRASTIVE_BATCH_SIZE = 64
 TOPICS_PER_CORPUS_FOR_AUDIT = 12
 RUN_HISTORICAL_AB_EVAL = True
-MIN_TECHNIQUE_LABEL_FREQ = 10
+MIN_TECHNIQUE_LABEL_FREQ = 1
 MAX_AB_EVAL_DOCS = 8000
 AB_RECALL_KS = (10, 50, 100)
 AB_UMAP_SAMPLE = 5000
@@ -1073,13 +1073,17 @@ def clean_text(value):
     return text
 
 
-def normalize_semantic_text(value):
+def light_clean_text(value):
     text = clean_text(value)
     if pd.isna(text):
         return pd.NA
-    text = unicodedata.normalize("NFKC", str(text)).lower()
-    text = re.sub(r"http\S+|www\.\S+|\b10\.\d{4,9}/\S+\b", " ", text)
-    text = re.sub(r"[^a-z0-9\s\-]", " ", text)
+    text = str(text).replace("\n", " ").replace("\r", " ")
+    text = re.sub(r"https?://\S+|doi:\S+", " ", text, flags=re.I)
+    text = text.lower().strip()
+    text = "".join(
+        ch for ch in unicodedata.normalize("NFKD", text)
+        if not unicodedata.combining(ch)
+    )
     text = re.sub(r"\s+", " ", text).strip()
     if not text:
         return pd.NA
@@ -1100,13 +1104,15 @@ def prepare_train_frame(corpus: str) -> pd.DataFrame:
     raw = pd.read_csv(csv_path, dtype=str, low_memory=False)
     raw = ensure_expected_cols(raw)
     raw["corpus"] = corpus
-    raw["title_clean"] = raw["TI"].map(normalize_semantic_text)
-    raw["abstract_clean"] = raw["AB"].map(normalize_semantic_text)
-    raw["de_clean"] = raw["DE"].map(normalize_semantic_text)
-    raw["id_clean"] = raw["ID"].map(normalize_semantic_text)
+    for col in ["TI", "AB", "DE", "ID", "SO", "PY", "TC", "DI"]:
+        raw[col] = raw[col].map(clean_text)
+    raw["title_clean"] = raw["TI"].map(light_clean_text)
+    raw["abstract_clean"] = raw["AB"].map(light_clean_text)
+    raw["de_clean"] = raw["DE"].map(light_clean_text)
+    raw["id_clean"] = raw["ID"].map(light_clean_text)
     raw["keywords_clean"] = (
         raw["de_clean"].fillna("").astype(str) + "; " + raw["id_clean"].fillna("").astype(str)
-    ).map(normalize_semantic_text)
+    ).map(light_clean_text)
     raw["text_full"] = (
         raw["title_clean"].fillna("").astype(str)
         + ". "
@@ -1121,13 +1127,13 @@ def prepare_train_frame(corpus: str) -> pd.DataFrame:
     ).str.replace(r"\s+", " ", regex=True).str.strip()
     raw["positive_side"] = raw["abstract_clean"].fillna(raw["text_full"])
     raw["text_tokens"] = raw["text_full"].fillna("").astype(str).str.split().str.len()
-    usable = raw[raw["text_tokens"] >= MIN_TOKENS].copy().reset_index(drop=True)
-    usable["doc_local_id"] = [f"{corpus}_{i:07d}" for i in range(len(usable))]
+    prepared = raw.reset_index(drop=True).copy()
+    prepared["doc_local_id"] = [f"{corpus}_{i:07d}" for i in range(len(prepared))]
     log(
-        f"[load] {corpus} | input={len(raw)} | usable={len(usable)} | "
+        f"[load] {corpus} | input={len(raw)} | ready={len(prepared)} | "
         f"abstract_pct={round(raw['abstract_clean'].notna().mean() * 100, 2) if len(raw) else 0.0}%"
     )
-    return usable
+    return prepared
 
 
 stage_banner("LEITURA DOS CORPORA DE TREINO")
@@ -1198,7 +1204,7 @@ SCIBERT_PAIRS = r'''
 
 stage_banner("MONTAGEM DE INSUMOS DE TREINO")
 
-dapt_texts = train_df["text_full"].dropna().astype(str).unique().tolist()
+dapt_texts = train_df["text_full"].dropna().astype(str).tolist()
 
 
 def build_pairs_for_corpus(df: pd.DataFrame, sample_cap: int | None = None) -> pd.DataFrame:
@@ -1276,11 +1282,8 @@ for corpus in TRAIN_CORPORA:
     )
 
 pair_df = pd.concat(pair_parts, ignore_index=True) if pair_parts else pd.DataFrame()
-pair_df = pair_df[
-    pair_df["query_side"].fillna("").astype(str).str.split().str.len().ge(2)
-    & pair_df["positive_side"].fillna("").astype(str).str.split().str.len().ge(8)
-].copy()
-pair_df = pair_df.drop_duplicates(subset=["query_side", "positive_side"]).reset_index(drop=True)
+if len(pair_df):
+    pair_df = pair_df.sample(frac=1.0, random_state=42).reset_index(drop=True)
 
 if MAX_CONTRASTIVE_PAIRS and len(pair_df) > MAX_CONTRASTIVE_PAIRS:
     pair_df = pair_df.sample(MAX_CONTRASTIVE_PAIRS, random_state=42).reset_index(drop=True)
@@ -1492,6 +1495,32 @@ SCIBERT_HISTORICAL_LABELS = r'''
 
 stage_banner("ROTULACAO FRACA MULTI-EIXO")
 
+BOILERPLATE = [
+    r"\belsevier\b.*?\bright(s)?\s+reserved\b",
+    r"\ball\s+rights\s+reserved\b",
+    r"\u00A9\s*\d{4,}\b",
+    r"\b(?:copyright)\b|\u00A9",
+]
+
+INLINE_TAGS = [
+    r"\binf\s*/\s*inf\b",
+    r"\bsup\s*/\s*sup\b",
+    r"\bsub\s*/\s*sub\b",
+    r"\b(et|al)\.\b",
+]
+
+
+def strong_clean(value):
+    text = clean_text(value)
+    if pd.isna(text):
+        return ""
+    text = str(text)
+    text = re.sub(r"https?://\S+|doi:\S+", " ", text, flags=re.I)
+    for pattern in BOILERPLATE + INLINE_TAGS:
+        text = re.sub(pattern, " ", text, flags=re.I)
+    text = re.sub(r"\s+", " ", text).strip()
+    return text
+
 fenomeno_patterns = {
     "solar_flare": r"\bsolar\s+flare(s)?\b|\b(goes[-\s]?(x|m|c)\s*class)\b|\bflare\s+forecast(ing)?\b",
     "solar_wind": r"\bsolar\s+wind\b|\binterplanetary\s+magnetic\s+field\b|\bimf\b",
@@ -1568,12 +1597,26 @@ def tag_with_patterns(text: str, patterns_dict: dict[str, str]) -> str:
     return ";".join(hits)
 
 
-label_df = historical_ab_source_df[["doc_local_id", "corpus", "DI", "PY", "text_full"]].copy()
-label_df["Fenomeno"] = label_df["text_full"].map(lambda text: tag_with_patterns(text, fenomeno_patterns))
-label_df["Tarefa"] = label_df["text_full"].map(lambda text: tag_with_patterns(text, tarefa_patterns))
-label_df["Metodo"] = label_df["text_full"].map(lambda text: tag_with_patterns(text, metodo_patterns))
-label_df["Tecnica"] = label_df["text_full"].map(lambda text: tag_with_patterns(text, tecnica_patterns))
-label_df["Dados"] = label_df["text_full"].map(lambda text: tag_with_patterns(text, dados_patterns))
+label_base_df = historical_ab_source_df[["doc_local_id", "corpus", "DI", "PY", "TI", "AB", "DE", "ID"]].copy()
+for col in ["TI", "AB", "DE", "ID"]:
+    label_base_df[col] = label_base_df[col].map(strong_clean)
+label_base_df["label_text_full"] = (
+    label_base_df["TI"].fillna("").astype(str).str.strip()
+    + ". "
+    + label_base_df["AB"].fillna("").astype(str).str.strip()
+    + " keywords: "
+    + label_base_df["DE"].fillna("").astype(str)
+    + "; "
+    + label_base_df["ID"].fillna("").astype(str)
+).str.replace(r"\s+", " ", regex=True).str.strip()
+
+label_df = label_base_df[["doc_local_id", "corpus", "PY"]].copy()
+label_df["DOI"] = label_base_df["DI"]
+label_df["Fenomeno"] = label_base_df["label_text_full"].map(lambda text: tag_with_patterns(text, fenomeno_patterns))
+label_df["Tarefa"] = label_base_df["label_text_full"].map(lambda text: tag_with_patterns(text, tarefa_patterns))
+label_df["Metodo"] = label_base_df["label_text_full"].map(lambda text: tag_with_patterns(text, metodo_patterns))
+label_df["Tecnica"] = label_base_df["label_text_full"].map(lambda text: tag_with_patterns(text, tecnica_patterns))
+label_df["Dados"] = label_base_df["label_text_full"].map(lambda text: tag_with_patterns(text, dados_patterns))
 label_df["primary_tecnica"] = label_df["Tecnica"].fillna("").astype(str).str.split(";").str[0].str.strip()
 label_df.to_csv(ARTIFACTS_DIR / "labels_multi_axis.csv", index=False)
 
@@ -1653,34 +1696,39 @@ if not RUN_HISTORICAL_AB_EVAL:
         json.dump({"status": "skipped_by_configuration", "run_ts": RUN_TS}, fh, indent=2, ensure_ascii=False)
 else:
     labels_df = pd.read_csv(ARTIFACTS_DIR / "labels_multi_axis.csv")
-    eval_df = historical_ab_source_df.merge(labels_df[["doc_local_id", "primary_tecnica"]], on="doc_local_id", how="left")
-    eval_df["primary_tecnica"] = eval_df["primary_tecnica"].fillna("").astype(str).str.strip()
-    eval_df["eval_text"] = eval_df["abstract_clean"].fillna(eval_df["text_full"]).fillna("").astype(str).str.strip()
-    eval_df = eval_df[
-        eval_df["primary_tecnica"].str.len().gt(0)
-        & eval_df["eval_text"].str.split().str.len().ge(MIN_TOKENS)
-    ].copy()
+    labels_lookup = labels_df.drop(columns=["DI"], errors="ignore")
+    labels_lookup = labels_lookup.rename(columns={"DOI": "DI"}).drop_duplicates(subset=["DI"], keep="first")
+    eval_df = historical_ab_source_df.merge(labels_lookup[["DI", "Tecnica"]], on="DI", how="left")
+    eval_df["Tecnica_clean"] = eval_df["Tecnica"].fillna("").astype(str).str.split(";").str[0].str.strip()
+    eval_df["eval_text"] = (
+        eval_df["abstract_clean"].where(eval_df["abstract_clean"].notna(), eval_df["text_full"])
+        .fillna("")
+        .astype(str)
+        .str.strip()
+    )
+    eval_df = eval_df[eval_df["Tecnica_clean"].str.len().gt(0)].copy()
 
-    label_counts = eval_df["primary_tecnica"].value_counts()
-    keep_labels = label_counts[label_counts >= MIN_TECHNIQUE_LABEL_FREQ].index.tolist()
-    eval_df = eval_df[eval_df["primary_tecnica"].isin(keep_labels)].copy()
+    if MIN_TECHNIQUE_LABEL_FREQ and int(MIN_TECHNIQUE_LABEL_FREQ) > 1:
+        label_counts = eval_df["Tecnica_clean"].value_counts()
+        keep_labels = label_counts[label_counts >= MIN_TECHNIQUE_LABEL_FREQ].index.tolist()
+        eval_df = eval_df[eval_df["Tecnica_clean"].isin(keep_labels)].copy()
 
     if MAX_AB_EVAL_DOCS:
         eval_df = eval_df.sample(n=min(MAX_AB_EVAL_DOCS, len(eval_df)), random_state=42).reset_index(drop=True)
 
-    if eval_df["primary_tecnica"].nunique() < 2:
+    if eval_df["Tecnica_clean"].nunique() < 2:
         raise RuntimeError(
-            "[ab] menos de duas classes elegiveis de primary_tecnica apos o filtro; "
+            "[ab] menos de duas classes elegiveis de Tecnica_clean apos o filtro; "
             "reduza MIN_TECHNIQUE_LABEL_FREQ ou revise a rotulacao fraca."
         )
 
     eval_df.to_csv(ARTIFACTS_DIR / "ab_eval_sample.csv", index=False)
     pd.DataFrame(
-        [{"primary_tecnica": label, "count": int(count)} for label, count in eval_df["primary_tecnica"].value_counts().items()]
+        [{"Tecnica_clean": label, "count": int(count)} for label, count in eval_df["Tecnica_clean"].value_counts().items()]
     ).to_csv(REPORTS_DIR / "ab_eval_primary_tecnica_counts.csv", index=False)
 
     texts = eval_df["eval_text"].tolist()
-    y_tecnica = eval_df["primary_tecnica"].tolist()
+    y_tecnica = eval_df["Tecnica_clean"].tolist()
     device_name = "cuda" if torch.cuda.is_available() else "cpu"
     encode_batch_size = 128 if torch.cuda.is_available() else 32
 
@@ -1696,7 +1744,7 @@ else:
     model_ft = SentenceTransformer(str(FINAL_MODEL_DIR), device=device_name)
 
     log(
-        f"[ab] docs={len(eval_df)} | classes={eval_df['primary_tecnica'].nunique()} | "
+        f"[ab] docs={len(eval_df)} | classes={eval_df['Tecnica_clean'].nunique()} | "
         f"batch_size={encode_batch_size}"
     )
     emb_base = model_baseline.encode(
@@ -1836,7 +1884,7 @@ else:
     with open(report_path, "w", encoding="utf-8") as fh:
         fh.write("# Experimento A/B - SciBERT (baseline) vs SciBERT-SolarPhysics-Search\n\n")
         fh.write(f"- docs avaliados: {len(eval_df)}\n")
-        fh.write(f"- classes de tecnica: {eval_df['primary_tecnica'].nunique()}\n")
+        fh.write(f"- classes de tecnica: {eval_df['Tecnica_clean'].nunique()}\n")
         fh.write(f"- corpus de treino: {', '.join(TRAIN_CORPORA)}\n\n")
         fh.write("## Clusterizacao (Tecnica)\n")
         fh.write(df_clu.to_markdown(index=False))
@@ -1852,7 +1900,7 @@ else:
     ab_summary = {
         "status": "completed",
         "eval_docs": int(len(eval_df)),
-        "eval_classes": int(eval_df["primary_tecnica"].nunique()),
+        "eval_classes": int(eval_df["Tecnica_clean"].nunique()),
         "min_technique_label_freq": int(MIN_TECHNIQUE_LABEL_FREQ),
         "max_ab_eval_docs": int(MAX_AB_EVAL_DOCS) if MAX_AB_EVAL_DOCS else None,
         "umap_generated": bool(fig_path.exists()),
@@ -1862,7 +1910,7 @@ else:
         json.dump(ab_summary, fh, indent=2, ensure_ascii=False)
 
     log(
-        f"[ab] concluido | docs={len(eval_df)} | classes={eval_df['primary_tecnica'].nunique()} | "
+        f"[ab] concluido | docs={len(eval_df)} | classes={eval_df['Tecnica_clean'].nunique()} | "
         f"report={report_path}"
     )
     display(df_clu)
