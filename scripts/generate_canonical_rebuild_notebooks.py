@@ -3724,8 +3724,10 @@ if old_pipe3_agent is not None:
 
 old_pipe3_h1 = read_csv_if_exists(HISTORICAL_FINAL_ROOT / "pipe3_H1_deltas_v2.csv")
 if old_pipe3_h1 is not None:
-    for row in old_pipe3_h1.itertuples(index=False):
-        add_hist("07", "Pipe3", f"pipe3_h1_{row.mode}_delta_domain_hit_retrieved", float(getattr(row, "delta_domain_hit_rate_abstract_retrieved_topk (R1-R0)")), HISTORICAL_FINAL_ROOT / "pipe3_H1_deltas_v2.csv", "delta historico R1-R0 no top-k")
+    delta_col = "delta_domain_hit_rate_abstract_retrieved_topk (R1-R0)"
+    if delta_col in old_pipe3_h1.columns:
+        for _, row in old_pipe3_h1.iterrows():
+            add_hist("07", "Pipe3", f"pipe3_h1_{row['mode']}_delta_domain_hit_retrieved", float(row[delta_col]), HISTORICAL_FINAL_ROOT / "pipe3_H1_deltas_v2.csv", "delta historico R1-R0 no top-k")
 
 
 # Camada 4 - historico sem pacote tabular estruturado equivalente
@@ -3933,14 +3935,14 @@ if ret_df is not None:
         "SciBERT-baseline": "baseline",
         "SciBERT-SolarPhysics-Search": "specialized",
     }
-    for row in ret_df.itertuples(index=False):
-        label = model_map.get(row.model)
+    for _, row in ret_df.iterrows():
+        label = model_map.get(row["model"])
         if not label:
             continue
-        add_rebuild("05", "SciBERT", f"scibert_mrr_{label}", float(row.MRR), CURRENT_05_ROOT / "reports" / "eval_retrieval_tecnica.csv", "MRR do Phase I canonico")
-        add_rebuild("05", "SciBERT", f"scibert_recall10_{label}", float(getattr(row, "Recall@10")), CURRENT_05_ROOT / "reports" / "eval_retrieval_tecnica.csv", "Recall@10 do Phase I canonico")
-        add_rebuild("05", "SciBERT", f"scibert_recall50_{label}", float(getattr(row, "Recall@50")), CURRENT_05_ROOT / "reports" / "eval_retrieval_tecnica.csv", "Recall@50 do Phase I canonico")
-        add_rebuild("05", "SciBERT", f"scibert_recall100_{label}", float(getattr(row, "Recall@100")), CURRENT_05_ROOT / "reports" / "eval_retrieval_tecnica.csv", "Recall@100 do Phase I canonico")
+        add_rebuild("05", "SciBERT", f"scibert_mrr_{label}", float(row["MRR"]), CURRENT_05_ROOT / "reports" / "eval_retrieval_tecnica.csv", "MRR do Phase I canonico")
+        add_rebuild("05", "SciBERT", f"scibert_recall10_{label}", float(row["Recall@10"]), CURRENT_05_ROOT / "reports" / "eval_retrieval_tecnica.csv", "Recall@10 do Phase I canonico")
+        add_rebuild("05", "SciBERT", f"scibert_recall50_{label}", float(row["Recall@50"]), CURRENT_05_ROOT / "reports" / "eval_retrieval_tecnica.csv", "Recall@50 do Phase I canonico")
+        add_rebuild("05", "SciBERT", f"scibert_recall100_{label}", float(row["Recall@100"]), CURRENT_05_ROOT / "reports" / "eval_retrieval_tecnica.csv", "Recall@100 do Phase I canonico")
 
 clu_df = read_csv_if_exists(CURRENT_05_ROOT / "reports" / "eval_clustering_tecnica.csv")
 if clu_df is not None:
@@ -3948,13 +3950,13 @@ if clu_df is not None:
         "SciBERT-baseline": "baseline",
         "SciBERT-SolarPhysics-Search": "specialized",
     }
-    for row in clu_df.itertuples(index=False):
-        label = model_map.get(row.model)
+    for _, row in clu_df.iterrows():
+        label = model_map.get(row["model"])
         if not label:
             continue
-        add_rebuild("05", "SciBERT", f"scibert_nmi_{label}", float(row.NMI), CURRENT_05_ROOT / "reports" / "eval_clustering_tecnica.csv", "NMI do Phase I canonico")
-        add_rebuild("05", "SciBERT", f"scibert_ari_{label}", float(row.ARI), CURRENT_05_ROOT / "reports" / "eval_clustering_tecnica.csv", "ARI do Phase I canonico")
-        add_rebuild("05", "SciBERT", f"scibert_silhouette_{label}", float(row.Silhouette), CURRENT_05_ROOT / "reports" / "eval_clustering_tecnica.csv", "Silhouette do Phase I canonico")
+        add_rebuild("05", "SciBERT", f"scibert_nmi_{label}", float(row["NMI"]), CURRENT_05_ROOT / "reports" / "eval_clustering_tecnica.csv", "NMI do Phase I canonico")
+        add_rebuild("05", "SciBERT", f"scibert_ari_{label}", float(row["ARI"]), CURRENT_05_ROOT / "reports" / "eval_clustering_tecnica.csv", "ARI do Phase I canonico")
+        add_rebuild("05", "SciBERT", f"scibert_silhouette_{label}", float(row["Silhouette"]), CURRENT_05_ROOT / "reports" / "eval_clustering_tecnica.csv", "Silhouette do Phase I canonico")
 
 nc_df = read_csv_if_exists(CURRENT_05_ROOT / "reports" / "eval_nearest_centroid.csv")
 if nc_df is not None:
@@ -3962,11 +3964,11 @@ if nc_df is not None:
         "SciBERT-baseline": "baseline",
         "SciBERT-SolarPhysics-Search": "specialized",
     }
-    for row in nc_df.itertuples(index=False):
-        label = model_map.get(row.model)
+    for _, row in nc_df.iterrows():
+        label = model_map.get(row["model"])
         if not label:
             continue
-        add_rebuild("05", "SciBERT", f"scibert_nearest_centroid_{label}", float(row.NearestCentroidAcc), CURRENT_05_ROOT / "reports" / "eval_nearest_centroid.csv", "nearest centroid accuracy do Phase I canonico")
+        add_rebuild("05", "SciBERT", f"scibert_nearest_centroid_{label}", float(row["NearestCentroidAcc"]), CURRENT_05_ROOT / "reports" / "eval_nearest_centroid.csv", "nearest centroid accuracy do Phase I canonico")
 
 hf_report = read_json_if_exists(CURRENT_05_ROOT / "reports" / "hf_publish_report.json")
 if hf_report:
