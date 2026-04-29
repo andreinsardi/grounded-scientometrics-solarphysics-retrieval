@@ -3429,6 +3429,939 @@ print("Arquivos finais salvos em:", WRITE_ROOT)
 '''
 
 
+PIPE9_MD = """
+# 09 Pipe 9 - methodological storyline pack
+
+Notebook canonico de sintese para:
+
+1. reunir os artefatos historicos do paper original;
+2. reunir os outputs canonicos do rebuild `00-08`;
+3. construir um crosswalk velho->novo por camada;
+4. consolidar comparacoes quantitativas e evolucoes metodologicas;
+5. exportar um pacote pronto para a reescrita do manuscrito do `major review`.
+
+## Papel metodologico
+
+Este notebook **nao** cria uma nova camada experimental. Ele organiza a evidencia necessaria para:
+
+- contar a historia real do pipeline original;
+- mostrar o que foi preservado no regime `core`;
+- mostrar o que foi acrescentado para o `major review`;
+- sustentar a comparacao entre paper original e rebuild canonico;
+- apoiar a reescrita do artigo e da carta-resposta.
+"""
+
+
+PIPE9_INSTALL = r'''
+# ============================================================
+# Instalacao de dependencias para Colab
+# ============================================================
+!pip install -U -q pip setuptools wheel
+!pip uninstall -y -q numpy scipy scikit-learn sentence-transformers transformers faiss-cpu numba umap-learn hdbscan || true
+!pip install -U -q numpy==2.0.2 scipy==1.14.1 pandas==2.2.2 openpyxl pyarrow jedi==0.19.2
+
+import numpy, scipy, pandas
+print("numpy            :", numpy.__version__)
+print("scipy            :", scipy.__version__)
+print("pandas           :", pandas.__version__)
+
+print("Dependencias instaladas.")
+'''
+
+
+PIPE9_IMPORTS = r'''
+from google.colab import drive
+drive.mount("/content/drive")
+
+import json
+import math
+import os
+import re
+import time
+from datetime import datetime
+from pathlib import Path
+
+import numpy as np
+import pandas as pd
+
+pd.set_option("display.max_columns", 240)
+pd.set_option("display.max_colwidth", 280)
+'''
+
+
+PIPE9_CONFIG = r'''
+# ============================================================
+# Configuracao geral
+# ============================================================
+
+DRIVE_ROOT = Path("/content/drive/MyDrive/Unicamp")
+PROJECT_ROOT = DRIVE_ROOT / "artigo bibliometria" / "grounded-scientometrics-solarphysics-retrieval"
+DATA_ROOT = DRIVE_ROOT / "artigo bibliometria" / "base de dados" / "Artigo_Bibliometria Base Bruta" / "BASES_UNIFICADAS_POR_TEMA"
+HISTORICAL_ROOT = DRIVE_ROOT / "artigo bibliometria" / "base de dados" / "artefatos artigo resvisado"
+HISTORICAL_FINAL_ROOT = DRIVE_ROOT / "artigo bibliometria" / "artefatatos finais"
+OVERLEAF_ROOT = DRIVE_ROOT / "artigo bibliometria" / "overleaf-sync"
+
+WRITE_ROOT = DATA_ROOT / "_cross_corpus_rebuild" / "09_methodological_storyline_pack"
+RUN_TS = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+CORPORA = ["Nucleo", "PIML", "CombFinal", "ML_Multimodal"]
+TRAIN_CORPORA = ["Nucleo", "PIML", "CombFinal"]
+PERIODS = ["core", "holdout"]
+
+CURRENT_05_ROOT = DATA_ROOT / "_cross_corpus_rebuild" / "05_scibert_solarphysics_search"
+CURRENT_06_ROOT = DATA_ROOT / "ML_Multimodal" / "04_rebuild_outputs" / "06_pipe2_retriever_analytics"
+CURRENT_07_ROOT = DATA_ROOT / "ML_Multimodal" / "04_rebuild_outputs" / "07_pipe3_agent_scientometrics"
+CURRENT_08_ROOT = DATA_ROOT / "ML_Multimodal" / "04_rebuild_outputs" / "08_pipe4_statistical_validation"
+
+HIST_ABSTRACT_NOTEBOOKS = {
+    "Nucleo": HISTORICAL_ROOT / "Abstract_LLM_gpu_Nucleo.ipynb",
+    "PIML": HISTORICAL_ROOT / "Abstract_LLM_gpu_piml.ipynb",
+    "CombFinal": HISTORICAL_ROOT / "Abstract_LLM_gpu_CombFinal.ipynb",
+    "ML_Multimodal": HISTORICAL_ROOT / "Abstract_LLM_gpu_ml.ipynb",
+}
+HIST_SCIBERT_NOTEBOOK = HISTORICAL_ROOT / "SciBERT_SolarPhysics_Search.ipynb"
+HIST_PIPE2_ROOT = HISTORICAL_ROOT / "pipe 2"
+HIST_PIPE2_NOTEBOOK = HISTORICAL_ROOT / "Pipeline_Analytcs_(SciBERT_SolarPhysics_Search) (3).ipynb"
+HIST_PIPE3_NOTEBOOK = HISTORICAL_FINAL_ROOT / "Piepe_3_Scientometrics.ipynb"
+HIST_PIPE4_NOTEBOOK = HISTORICAL_FINAL_ROOT / "PIPE_4_Validacao_Estatistica.ipynb"
+MANUSCRIPT_TEX = OVERLEAF_ROOT / "sn-article.tex"
+PLAN_MD = HISTORICAL_ROOT / "PLANO_OPERACIONAL_MAJOR_REVIEW_REBUILD.md"
+
+assert PROJECT_ROOT.exists(), f"PROJECT_ROOT nao encontrado: {PROJECT_ROOT}"
+assert DATA_ROOT.exists(), f"DATA_ROOT nao encontrado: {DATA_ROOT}"
+assert HISTORICAL_ROOT.exists(), f"HISTORICAL_ROOT nao encontrado: {HISTORICAL_ROOT}"
+assert HISTORICAL_FINAL_ROOT.exists(), f"HISTORICAL_FINAL_ROOT nao encontrado: {HISTORICAL_FINAL_ROOT}"
+assert MANUSCRIPT_TEX.exists(), f"MANUSCRIPT_TEX nao encontrado: {MANUSCRIPT_TEX}"
+assert PLAN_MD.exists(), f"PLAN_MD nao encontrado: {PLAN_MD}"
+
+print("WRITE_ROOT =", WRITE_ROOT)
+print("HISTORICAL_ROOT =", HISTORICAL_ROOT)
+print("HISTORICAL_FINAL_ROOT =", HISTORICAL_FINAL_ROOT)
+print("PLAN_MD =", PLAN_MD)
+'''
+
+
+PIPE9_LOGGING = r'''
+# ============================================================
+# Helpers e logging
+# ============================================================
+
+PIPE_START_TS = time.time()
+TABLES_DIR = WRITE_ROOT / "tables"
+REPORTS_DIR = WRITE_ROOT / "reports"
+ARTIFACTS_DIR = WRITE_ROOT / "artifacts"
+for path in [WRITE_ROOT, TABLES_DIR, REPORTS_DIR, ARTIFACTS_DIR]:
+    path.mkdir(parents=True, exist_ok=True)
+
+GLOBAL_LOG_FILE = PROJECT_ROOT / "outputs" / "camada5_logs" / f"09_storyline_{RUN_TS}.txt"
+GLOBAL_LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
+
+
+def log(message: str) -> None:
+    elapsed = int(time.time() - PIPE_START_TS)
+    hh = elapsed // 3600
+    mm = (elapsed % 3600) // 60
+    ss = elapsed % 60
+    prefix = f"[{datetime.now().strftime('%H:%M:%S')} | +{hh:02d}:{mm:02d}:{ss:02d}]"
+    line = f"{prefix} {message}"
+    print(line, flush=True)
+    with open(GLOBAL_LOG_FILE, "a", encoding="utf-8") as fh:
+        fh.write(line + "\n")
+
+
+def stage_banner(title: str) -> None:
+    bar = "=" * 96
+    log(bar)
+    log(title)
+    log(bar)
+
+
+def read_json_if_exists(path: Path):
+    if not path.exists():
+        return None
+    with open(path, "r", encoding="utf-8") as fh:
+        return json.load(fh)
+
+
+def read_csv_if_exists(path: Path):
+    if not path.exists():
+        return None
+    return pd.read_csv(path)
+
+
+def safe_pct_non_empty(series: pd.Series) -> float:
+    if len(series) == 0:
+        return 0.0
+    return round(float(series.fillna("").astype(str).str.len().gt(0).mean() * 100), 2)
+
+
+def normalize_number(value):
+    if value is None:
+        return np.nan
+    try:
+        if pd.isna(value):
+            return np.nan
+    except Exception:
+        pass
+    try:
+        return float(value)
+    except Exception:
+        return value
+
+
+def comparison_status(historical_value, rebuild_value) -> str:
+    try:
+        h = float(historical_value)
+        r = float(rebuild_value)
+    except Exception:
+        return "non_numeric"
+    if not np.isfinite(h) or not np.isfinite(r):
+        return "missing"
+    if abs(h - r) < 1e-9:
+        return "exact_match"
+    rel = abs(r - h) / max(abs(h), 1e-9)
+    if rel <= 0.05:
+        return "near_match"
+    if rel <= 0.20:
+        return "moderate_shift"
+    return "major_shift"
+
+
+def fmt_num(value, digits: int = 4) -> str:
+    try:
+        x = float(value)
+    except Exception:
+        return str(value)
+    if not np.isfinite(x):
+        return "n/a"
+    if abs(x) >= 100:
+        return f"{x:,.1f}"
+    if abs(x) >= 10:
+        return f"{x:,.2f}"
+    return f"{x:.{digits}f}"
+'''
+
+
+PIPE9_HISTORICAL = r'''
+# ============================================================
+# Referencias historicas auditadas + crosswalk
+# ============================================================
+
+stage_banner("REFERENCIAS HISTORICAS E CROSSWALK")
+
+historical_rows = []
+
+
+def add_hist(layer: str, metric_group: str, metric_key: str, value, source_path: Path, note: str) -> None:
+    historical_rows.append(
+        {
+            "layer": layer,
+            "metric_group": metric_group,
+            "metric_key": metric_key,
+            "value": value,
+            "source_path": str(source_path),
+            "note": note,
+        }
+    )
+
+
+# Camada 0 / 1 - referencias auditadas durante o rebuild
+add_hist("00", "Nucleo", "Nucleo_total_docs", 7349, MANUSCRIPT_TEX, "total historico do corpus Nucleo reportado no manuscrito original")
+add_hist("00", "PIML", "PIML_total_docs", 12866, MANUSCRIPT_TEX, "total historico do corpus PIML reportado no manuscrito original")
+add_hist("00", "CombFinal", "CombFinal_total_docs", 982, MANUSCRIPT_TEX, "total historico do corpus CombFinal reportado no manuscrito original")
+
+add_hist("01", "Nucleo", "Nucleo_core_rows_used", 5036, HIST_ABSTRACT_NOTEBOOKS["Nucleo"], "abstracts limpos usados no Abstract_LLM historico")
+add_hist("01", "Nucleo", "Nucleo_core_k", 30, HIST_ABSTRACT_NOTEBOOKS["Nucleo"], "numero de clusters historico do Nucleo")
+add_hist("01", "PIML", "PIML_core_rows_used", 8955, HIST_ABSTRACT_NOTEBOOKS["PIML"], "abstracts limpos usados no Abstract_LLM historico")
+add_hist("01", "PIML", "PIML_core_k", 30, HIST_ABSTRACT_NOTEBOOKS["PIML"], "numero de clusters historico do PIML")
+add_hist("01", "CombFinal", "CombFinal_core_rows_used", 780, HIST_ABSTRACT_NOTEBOOKS["CombFinal"], "abstracts limpos usados no Abstract_LLM historico")
+add_hist("01", "CombFinal", "CombFinal_core_k", 30, HIST_ABSTRACT_NOTEBOOKS["CombFinal"], "numero de clusters historico do CombFinal")
+add_hist("01", "ML_Multimodal", "ML_Multimodal_core_rows_used", 83771, HIST_ABSTRACT_NOTEBOOKS["ML_Multimodal"], "abstracts limpos usados no Abstract_LLM historico do ML")
+add_hist("01", "ML_Multimodal", "ML_Multimodal_core_k", 30, HIST_ABSTRACT_NOTEBOOKS["ML_Multimodal"], "numero de clusters historico do ML")
+
+add_hist("05", "SciBERT", "scibert_dapt_docs", 21197, HIST_SCIBERT_NOTEBOOK, "volume historico do DAPT")
+add_hist("05", "SciBERT", "scibert_dapt_perplexity", 3.12, HIST_SCIBERT_NOTEBOOK, "perplexity historica auditada do DAPT")
+add_hist("05", "SciBERT", "scibert_contrastive_pairs", 36424, HIST_SCIBERT_NOTEBOOK, "pares contrastivos historicos")
+add_hist("05", "SciBERT", "scibert_ab_docs", 4555, HIST_SCIBERT_NOTEBOOK, "tamanho da amostra A/B historica")
+add_hist("05", "SciBERT", "scibert_ab_classes", 15, HIST_SCIBERT_NOTEBOOK, "numero de classes de tecnica na A/B historica")
+add_hist("05", "SciBERT", "scibert_mrr_baseline", 0.668291, HIST_SCIBERT_NOTEBOOK, "MRR historico do baseline")
+add_hist("05", "SciBERT", "scibert_mrr_specialized", 0.703821, HIST_SCIBERT_NOTEBOOK, "MRR historico do modelo especializado")
+add_hist("05", "SciBERT", "scibert_recall10_baseline", 0.880132, HIST_SCIBERT_NOTEBOOK, "Recall@10 historico do baseline")
+add_hist("05", "SciBERT", "scibert_recall10_specialized", 0.899671, HIST_SCIBERT_NOTEBOOK, "Recall@10 historico do especializado")
+add_hist("05", "SciBERT", "scibert_recall50_baseline", 0.979802, HIST_SCIBERT_NOTEBOOK, "Recall@50 historico do baseline")
+add_hist("05", "SciBERT", "scibert_recall50_specialized", 0.986828, HIST_SCIBERT_NOTEBOOK, "Recall@50 historico do especializado")
+add_hist("05", "SciBERT", "scibert_recall100_baseline", 0.991877, HIST_SCIBERT_NOTEBOOK, "Recall@100 historico do baseline")
+add_hist("05", "SciBERT", "scibert_recall100_specialized", 0.995170, HIST_SCIBERT_NOTEBOOK, "Recall@100 historico do especializado")
+add_hist("05", "SciBERT", "scibert_nmi_baseline", 0.093411, HIST_SCIBERT_NOTEBOOK, "NMI historico do baseline")
+add_hist("05", "SciBERT", "scibert_nmi_specialized", 0.108490, HIST_SCIBERT_NOTEBOOK, "NMI historico do especializado")
+add_hist("05", "SciBERT", "scibert_ari_baseline", 0.027942, HIST_SCIBERT_NOTEBOOK, "ARI historico do baseline")
+add_hist("05", "SciBERT", "scibert_ari_specialized", 0.036066, HIST_SCIBERT_NOTEBOOK, "ARI historico do especializado")
+add_hist("05", "SciBERT", "scibert_silhouette_baseline", 0.120245, HIST_SCIBERT_NOTEBOOK, "Silhouette historico do baseline")
+add_hist("05", "SciBERT", "scibert_silhouette_specialized", 0.140223, HIST_SCIBERT_NOTEBOOK, "Silhouette historico do especializado")
+add_hist("05", "SciBERT", "scibert_nearest_centroid_baseline", 0.315000, HIST_SCIBERT_NOTEBOOK, "Nearest centroid accuracy historico do baseline")
+add_hist("05", "SciBERT", "scibert_nearest_centroid_specialized", 0.441000, HIST_SCIBERT_NOTEBOOK, "Nearest centroid accuracy historico do especializado")
+
+
+# Camada 2 - historico estruturado em CSV
+old_pipe2_docs = read_csv_if_exists(HIST_PIPE2_ROOT / "docs_master.csv")
+old_pipe2_index = read_csv_if_exists(HIST_PIPE2_ROOT / "index_map.csv")
+if old_pipe2_docs is not None:
+    add_hist("06", "Pipe2", "pipe2_application_docs_rows", int(len(old_pipe2_docs)), HIST_PIPE2_ROOT / "docs_master.csv", "docs_master historico de aplicacao")
+if old_pipe2_index is not None:
+    add_hist("06", "Pipe2", "pipe2_index_map_rows", int(len(old_pipe2_index)), HIST_PIPE2_ROOT / "index_map.csv", "index_map historico de aplicacao")
+
+
+# Camada 3 - historico estruturado em CSV
+old_pipe3_agent = read_csv_if_exists(HISTORICAL_FINAL_ROOT / "pipe3_agent_metrics.csv")
+if old_pipe3_agent is not None:
+    for row in old_pipe3_agent.itertuples(index=False):
+        retr_label = "generic" if row.retriever == "R0" else "specialized"
+        mode_label = str(row.mode)
+        add_hist("07", "Pipe3", f"pipe3_{retr_label}_{mode_label}_gaps", int(row.gaps), HISTORICAL_FINAL_ROOT / "pipe3_agent_metrics.csv", "numero de gaps no package final historico")
+        add_hist("07", "Pipe3", f"pipe3_{retr_label}_{mode_label}_domain_hit_abstract_retrieved_topk", float(row.domain_hit_rate_abstract_retrieved_topk), HISTORICAL_FINAL_ROOT / "pipe3_agent_metrics.csv", "domain hit rate historico no top-k reconstruido")
+        if not pd.isna(row.domain_hit_rate_abstract_cited):
+            add_hist("07", "Pipe3", f"pipe3_{retr_label}_{mode_label}_domain_hit_abstract_cited", float(row.domain_hit_rate_abstract_cited), HISTORICAL_FINAL_ROOT / "pipe3_agent_metrics.csv", "domain hit rate historico nas evidencias citadas")
+
+old_pipe3_h1 = read_csv_if_exists(HISTORICAL_FINAL_ROOT / "pipe3_H1_deltas_v2.csv")
+if old_pipe3_h1 is not None:
+    for row in old_pipe3_h1.itertuples(index=False):
+        add_hist("07", "Pipe3", f"pipe3_h1_{row.mode}_delta_domain_hit_retrieved", float(getattr(row, "delta_domain_hit_rate_abstract_retrieved_topk (R1-R0)")), HISTORICAL_FINAL_ROOT / "pipe3_H1_deltas_v2.csv", "delta historico R1-R0 no top-k")
+
+
+# Camada 4 - historico sem pacote tabular estruturado equivalente
+add_hist("08", "Pipe4", "pipe4_historical_notebook_present", 1, HIST_PIPE4_NOTEBOOK, "o notebook historico de validacao estatistica existe, mas nao ha pacote tabular equivalente ao rebuild")
+
+historical_df = pd.DataFrame(historical_rows)
+historical_df.to_csv(TABLES_DIR / "historical_reference_metrics.csv", index=False)
+
+layer_crosswalk = pd.DataFrame(
+    [
+        {
+            "historical_step": "R consolidation scripts",
+            "historical_artifact": "consolida_base_bruta_*.R / *.txt",
+            "historical_role": "engenharia das bases",
+            "rebuild_pipe": "00_consolidacao",
+            "rebuild_role": "corpora canonicos core/holdout",
+            "major_review_increment": "split temporal core/holdout com trilha auditavel",
+        },
+        {
+            "historical_step": "Abstract_LLM_gpu_*",
+            "historical_artifact": "Abstract_LLM_gpu_*.ipynb",
+            "historical_role": "estrutura semantica upstream",
+            "rebuild_pipe": "01-04_abstract_llm_*",
+            "rebuild_role": "topicos core/holdout por corpus",
+            "major_review_increment": "run_metadata, manifests, holdout espelhado",
+        },
+        {
+            "historical_step": "SciBERT_SolarPhysics_Search",
+            "historical_artifact": "SciBERT_SolarPhysics_Search.ipynb",
+            "historical_role": "treino do retriever especializado",
+            "rebuild_pipe": "05_scibert_solarphysics_search",
+            "rebuild_role": "DAPT + contrastive + A/B paper-facing",
+            "major_review_increment": "HF publish, labels audit, reproducibilidade core-only",
+        },
+        {
+            "historical_step": "Pipeline_Analytcs",
+            "historical_artifact": "Pipeline_Analytcs_(SciBERT_SolarPhysics_Search)",
+            "historical_role": "ponte entre retriever e corpus de aplicacao",
+            "rebuild_pipe": "06_pipe2_retriever_analytics",
+            "rebuild_role": "docs_master/index_map e FAISS por periodo",
+            "major_review_increment": "indices generic/specialized em core e holdout",
+        },
+        {
+            "historical_step": "Piepe_3_Scientometrics",
+            "historical_artifact": "Piepe_3_Scientometrics.ipynb + pipe3_*.csv",
+            "historical_role": "experimento final do paper",
+            "rebuild_pipe": "07_pipe3_agent_scientometrics",
+            "rebuild_role": "bundles grounded + BM25 + tabelas paper-ready",
+            "major_review_increment": "baseline lexical e outputs separados por periodo",
+        },
+        {
+            "historical_step": "PIPE_4_Validacao_Estatistica",
+            "historical_artifact": "PIPE_4_Validacao_Estatistica.ipynb",
+            "historical_role": "validacao final",
+            "rebuild_pipe": "08_pipe4_statistical_validation",
+            "rebuild_role": "bootstrap CI, deltas, auditoria manual",
+            "major_review_increment": "camada estatistica mais rastreavel e temporal",
+        },
+        {
+            "historical_step": "Narrativa dispersa",
+            "historical_artifact": "manuscrito + notebooks + exports",
+            "historical_role": "historia metodologica implicita",
+            "rebuild_pipe": "09_methodological_storyline_pack",
+            "rebuild_role": "crosswalk + comparacoes + storyline",
+            "major_review_increment": "pacote explicito para reescrita e resposta ao major review",
+        },
+    ]
+)
+layer_crosswalk.to_csv(TABLES_DIR / "layer_crosswalk.csv", index=False)
+
+evolution_df = pd.DataFrame(
+    [
+        {
+            "dimension": "temporal_split",
+            "historical_state": "corpus unico sem split explicito por periodo",
+            "major_review_state": "regimes core e holdout espelhados",
+            "manuscript_use": "separar replicacao principal de validacao temporal",
+        },
+        {
+            "dimension": "retriever_baselines",
+            "historical_state": "SciBERT generico vs especializado no Phase I",
+            "major_review_state": "SciBERT generico + especializado + BM25 no downstream",
+            "manuscript_use": "justificar baseline lexical sem mudar a tese central",
+        },
+        {
+            "dimension": "traceability",
+            "historical_state": "artefatos distribuidos e parcialmente implicitos",
+            "major_review_state": "logs, manifests, docs_master, index_map e pacotes por camada",
+            "manuscript_use": "reforcar auditabilidade e reprodutibilidade",
+        },
+        {
+            "dimension": "publication",
+            "historical_state": "modelo especializado treinado no Colab historico",
+            "major_review_state": "modelo republlicado no Hugging Face",
+            "manuscript_use": "mostrar disponibilizacao do retriever especializado",
+        },
+        {
+            "dimension": "statistical_validation",
+            "historical_state": "validacao menos estruturada",
+            "major_review_state": "bootstrap CI, deltas por periodo e amostra de auditoria manual",
+            "manuscript_use": "apoiar a secao de robustez do major review",
+        },
+    ]
+)
+evolution_df.to_csv(TABLES_DIR / "major_review_evolution_points.csv", index=False)
+
+display(historical_df.head(40))
+display(layer_crosswalk)
+display(evolution_df)
+'''
+
+
+PIPE9_REBUILD = r'''
+# ============================================================
+# Snapshot do rebuild canonico 00-08
+# ============================================================
+
+stage_banner("SNAPSHOT DO REBUILD 00-08")
+
+rebuild_rows = []
+
+
+def add_rebuild(layer: str, metric_group: str, metric_key: str, value, source_path: Path, note: str) -> None:
+    rebuild_rows.append(
+        {
+            "layer": layer,
+            "metric_group": metric_group,
+            "metric_key": metric_key,
+            "value": value,
+            "source_path": str(source_path),
+            "note": note,
+        }
+    )
+
+
+# 00 - consolidacao
+for corpus in CORPORA:
+    total_rows = 0
+    for period in PERIODS:
+        csv_path = DATA_ROOT / corpus / "04_rebuild_outputs" / "00_consolidacao" / f"{corpus}_{period}_bibliometrix_clean.csv"
+        if not csv_path.exists():
+            continue
+        df = pd.read_csv(csv_path, dtype=str, low_memory=False)
+        total_rows += int(len(df))
+        add_rebuild("00", corpus, f"{corpus}_{period}_rows", int(len(df)), csv_path, "rows no consolidado canonico")
+        if "AB" in df.columns:
+            add_rebuild("00", corpus, f"{corpus}_{period}_abstract_pct", safe_pct_non_empty(df["AB"]), csv_path, "percentual com abstract no consolidado")
+    if total_rows > 0:
+        add_rebuild("00", corpus, f"{corpus}_total_docs", total_rows, DATA_ROOT / corpus / "04_rebuild_outputs" / "00_consolidacao", "soma core+holdout do consolidado canonico")
+        log(f"[00] {corpus} | total_docs={total_rows}")
+
+
+# 01-04 - abstract llm
+for corpus in CORPORA:
+    for period in PERIODS:
+        period_root = DATA_ROOT / corpus / "04_rebuild_outputs" / "01_abstract_llm" / period
+        meta_path = period_root / f"{corpus}_{period}_run_metadata.json"
+        meta = read_json_if_exists(meta_path)
+        rows_used = None
+        chosen_k = None
+        if meta:
+            rows_used = meta.get("rows_used")
+            chosen_k = meta.get("chosen_n_clusters")
+        else:
+            doc_assign_path = period_root / "tables" / f"{corpus}_{period}_doc_topic_assignment.csv"
+            tuning_path = period_root / "tables" / f"{corpus}_{period}_topic_model_tuning.csv"
+            doc_assign_df = read_csv_if_exists(doc_assign_path)
+            tuning_df = read_csv_if_exists(tuning_path)
+            if doc_assign_df is not None:
+                rows_used = int(len(doc_assign_df))
+            if tuning_df is not None and len(tuning_df):
+                chosen_k = int(tuning_df.sort_values(["score", "n_clusters"], ascending=[False, True]).iloc[0]["n_clusters"])
+        if rows_used is not None:
+            add_rebuild("01", corpus, f"{corpus}_{period}_rows_used", int(rows_used), meta_path if meta_path.exists() else period_root, "rows efetivamente usados no Abstract_LLM canonico")
+        if chosen_k is not None:
+            add_rebuild("01", corpus, f"{corpus}_{period}_k", int(chosen_k), meta_path if meta_path.exists() else period_root, "k final do Abstract_LLM canonico")
+    log(f"[01] {corpus} | snapshot coletado")
+
+
+# 05 - SciBERT / Phase I
+train_summary = read_csv_if_exists(CURRENT_05_ROOT / "artifacts" / "training_input_summary.csv")
+if train_summary is not None and len(train_summary):
+    add_rebuild("05", "SciBERT", "scibert_dapt_docs", int(train_summary.iloc[0]["n_dapt_texts"]), CURRENT_05_ROOT / "artifacts" / "training_input_summary.csv", "numero de textos usados no DAPT")
+    add_rebuild("05", "SciBERT", "scibert_contrastive_pairs", int(train_summary.iloc[0]["n_pairs"]), CURRENT_05_ROOT / "artifacts" / "training_input_summary.csv", "numero de pares contrastivos")
+
+dapt_metrics = read_json_if_exists(CURRENT_05_ROOT / "reports" / "dapt_eval_metrics.json")
+if dapt_metrics:
+    add_rebuild("05", "SciBERT", "scibert_dapt_perplexity", dapt_metrics.get("perplexity"), CURRENT_05_ROOT / "reports" / "dapt_eval_metrics.json", "perplexity do DAPT canonico")
+    add_rebuild("05", "SciBERT", "scibert_dapt_eval_loss", dapt_metrics.get("eval_loss"), CURRENT_05_ROOT / "reports" / "dapt_eval_metrics.json", "eval loss do DAPT canonico")
+
+labels_cov = read_csv_if_exists(CURRENT_05_ROOT / "artifacts" / "labels_coverage.csv")
+if labels_cov is not None and len(labels_cov):
+    tecnica_row = labels_cov.loc[labels_cov["axis"] == "Tecnica"]
+    if len(tecnica_row):
+        add_rebuild("05", "SciBERT", "scibert_tecnica_coverage_pct", float(tecnica_row.iloc[0]["coverage_pct"]), CURRENT_05_ROOT / "artifacts" / "labels_coverage.csv", "cobertura da rotulacao fraca na tecnica")
+
+ab_summary = read_json_if_exists(CURRENT_05_ROOT / "reports" / "historical_ab_eval_summary.json")
+if ab_summary:
+    add_rebuild("05", "SciBERT", "scibert_ab_docs", ab_summary.get("eval_docs"), CURRENT_05_ROOT / "reports" / "historical_ab_eval_summary.json", "docs na avaliacao A/B paper-facing")
+    add_rebuild("05", "SciBERT", "scibert_ab_classes", ab_summary.get("eval_classes"), CURRENT_05_ROOT / "reports" / "historical_ab_eval_summary.json", "classes na avaliacao A/B paper-facing")
+
+ret_df = read_csv_if_exists(CURRENT_05_ROOT / "reports" / "eval_retrieval_tecnica.csv")
+if ret_df is not None:
+    model_map = {
+        "SciBERT-baseline": "baseline",
+        "SciBERT-SolarPhysics-Search": "specialized",
+    }
+    for row in ret_df.itertuples(index=False):
+        label = model_map.get(row.model)
+        if not label:
+            continue
+        add_rebuild("05", "SciBERT", f"scibert_mrr_{label}", float(row.MRR), CURRENT_05_ROOT / "reports" / "eval_retrieval_tecnica.csv", "MRR do Phase I canonico")
+        add_rebuild("05", "SciBERT", f"scibert_recall10_{label}", float(getattr(row, "Recall@10")), CURRENT_05_ROOT / "reports" / "eval_retrieval_tecnica.csv", "Recall@10 do Phase I canonico")
+        add_rebuild("05", "SciBERT", f"scibert_recall50_{label}", float(getattr(row, "Recall@50")), CURRENT_05_ROOT / "reports" / "eval_retrieval_tecnica.csv", "Recall@50 do Phase I canonico")
+        add_rebuild("05", "SciBERT", f"scibert_recall100_{label}", float(getattr(row, "Recall@100")), CURRENT_05_ROOT / "reports" / "eval_retrieval_tecnica.csv", "Recall@100 do Phase I canonico")
+
+clu_df = read_csv_if_exists(CURRENT_05_ROOT / "reports" / "eval_clustering_tecnica.csv")
+if clu_df is not None:
+    model_map = {
+        "SciBERT-baseline": "baseline",
+        "SciBERT-SolarPhysics-Search": "specialized",
+    }
+    for row in clu_df.itertuples(index=False):
+        label = model_map.get(row.model)
+        if not label:
+            continue
+        add_rebuild("05", "SciBERT", f"scibert_nmi_{label}", float(row.NMI), CURRENT_05_ROOT / "reports" / "eval_clustering_tecnica.csv", "NMI do Phase I canonico")
+        add_rebuild("05", "SciBERT", f"scibert_ari_{label}", float(row.ARI), CURRENT_05_ROOT / "reports" / "eval_clustering_tecnica.csv", "ARI do Phase I canonico")
+        add_rebuild("05", "SciBERT", f"scibert_silhouette_{label}", float(row.Silhouette), CURRENT_05_ROOT / "reports" / "eval_clustering_tecnica.csv", "Silhouette do Phase I canonico")
+
+nc_df = read_csv_if_exists(CURRENT_05_ROOT / "reports" / "eval_nearest_centroid.csv")
+if nc_df is not None:
+    model_map = {
+        "SciBERT-baseline": "baseline",
+        "SciBERT-SolarPhysics-Search": "specialized",
+    }
+    for row in nc_df.itertuples(index=False):
+        label = model_map.get(row.model)
+        if not label:
+            continue
+        add_rebuild("05", "SciBERT", f"scibert_nearest_centroid_{label}", float(row.NearestCentroidAcc), CURRENT_05_ROOT / "reports" / "eval_nearest_centroid.csv", "nearest centroid accuracy do Phase I canonico")
+
+hf_report = read_json_if_exists(CURRENT_05_ROOT / "reports" / "hf_publish_report.json")
+if hf_report:
+    add_rebuild("05", "SciBERT", "scibert_hf_publish_success", int(bool(hf_report.get("status") == "published" or hf_report.get("published") or hf_report.get("push_commit"))), CURRENT_05_ROOT / "reports" / "hf_publish_report.json", "indicador de publicacao no HF")
+
+log("[05] snapshot coletado")
+
+
+# 06 - Pipe 2
+pipe2_cov = read_csv_if_exists(CURRENT_06_ROOT / "tables" / "ml_docs_master_coverage.csv")
+if pipe2_cov is not None:
+    for row in pipe2_cov.itertuples(index=False):
+        add_rebuild("06", "Pipe2", f"pipe2_{row.period}_docs_rows", int(row.rows), CURRENT_06_ROOT / "tables" / "ml_docs_master_coverage.csv", "docs_master por periodo")
+        if row.period == "core":
+            add_rebuild("06", "Pipe2", "pipe2_application_docs_rows", int(row.rows), CURRENT_06_ROOT / "tables" / "ml_docs_master_coverage.csv", "docs_master do regime de replicacao principal")
+
+core_index = read_csv_if_exists(CURRENT_06_ROOT / "core" / "tables" / "ML_Multimodal_core_index_map.csv")
+if core_index is not None:
+    add_rebuild("06", "Pipe2", "pipe2_index_map_rows", int(len(core_index)), CURRENT_06_ROOT / "core" / "tables" / "ML_Multimodal_core_index_map.csv", "index_map do regime de replicacao principal")
+
+query_bank = read_csv_if_exists(CURRENT_06_ROOT / "tables" / "core_gap_query_bank.csv")
+if query_bank is not None:
+    add_rebuild("06", "Pipe2", "pipe2_query_bank_size", int(len(query_bank)), CURRENT_06_ROOT / "tables" / "core_gap_query_bank.csv", "banco de queries derivado do core")
+
+white_space = read_csv_if_exists(CURRENT_06_ROOT / "tables" / "white_space_candidates.csv")
+if white_space is not None:
+    add_rebuild("06", "Pipe2", "pipe2_white_space_candidates", int(len(white_space)), CURRENT_06_ROOT / "tables" / "white_space_candidates.csv", "candidatos iniciais de white space")
+
+log("[06] snapshot coletado")
+
+
+# 07 - Pipe 3
+pipe3_summary = read_csv_if_exists(CURRENT_07_ROOT / "tables" / "paper_ready_retriever_summary.csv")
+if pipe3_summary is not None:
+    for row in pipe3_summary.itertuples(index=False):
+        add_rebuild("07", "Pipe3", f"pipe3_{row.period}_{row.retriever}_n_queries", int(row.n_queries), CURRENT_07_ROOT / "tables" / "paper_ready_retriever_summary.csv", "queries agregadas por retriever no Pipe 3")
+        add_rebuild("07", "Pipe3", f"pipe3_{row.period}_{row.retriever}_mean_top1_score", float(row.mean_top1_score), CURRENT_07_ROOT / "tables" / "paper_ready_retriever_summary.csv", "score medio top1 agregado no Pipe 3")
+
+agent_outputs = read_csv_if_exists(CURRENT_07_ROOT / "tables" / "agent_outputs.csv")
+if agent_outputs is not None:
+    add_rebuild("07", "Pipe3", "pipe3_agent_outputs_count", int(len(agent_outputs)), CURRENT_07_ROOT / "tables" / "agent_outputs.csv", "quantidade de saidas grounded produzidas")
+    add_rebuild("07", "Pipe3", "pipe3_agent_openai_ok_count", int((agent_outputs["agent_status"] == "openai_ok").sum()), CURRENT_07_ROOT / "tables" / "agent_outputs.csv", "quantidade de saidas com sucesso de OpenAI")
+
+bm25_hits = read_csv_if_exists(CURRENT_07_ROOT / "tables" / "bm25_query_hits.csv")
+if bm25_hits is not None:
+    add_rebuild("07", "Pipe3", "pipe3_bm25_hits_rows", int(len(bm25_hits)), CURRENT_07_ROOT / "tables" / "bm25_query_hits.csv", "rows do baseline BM25 no Pipe 3")
+
+log("[07] snapshot coletado")
+
+
+# 08 - Pipe 4
+pipe4_summary = read_csv_if_exists(CURRENT_08_ROOT / "tables" / "statistical_summary.csv")
+if pipe4_summary is not None:
+    for row in pipe4_summary.itertuples(index=False):
+        add_rebuild("08", "Pipe4", f"pipe4_{row.period}_{row.retriever}_mean_top1_score", float(row.mean_top1_score), CURRENT_08_ROOT / "tables" / "statistical_summary.csv", "media bootstrap de top1 no Pipe 4")
+
+pipe4_delta = read_csv_if_exists(CURRENT_08_ROOT / "tables" / "paired_deltas.csv")
+if pipe4_delta is not None and len(pipe4_delta):
+    for row in pipe4_delta.itertuples(index=False):
+        add_rebuild("08", "Pipe4", f"pipe4_{row.period}_{row.metric}", float(row.mean), CURRENT_08_ROOT / "tables" / "paired_deltas.csv", "delta pareado bootstrap no Pipe 4")
+
+pipe4_audit = read_csv_if_exists(CURRENT_08_ROOT / "tables" / "manual_audit_sample.csv")
+if pipe4_audit is not None:
+    add_rebuild("08", "Pipe4", "pipe4_manual_audit_rows", int(len(pipe4_audit)), CURRENT_08_ROOT / "tables" / "manual_audit_sample.csv", "tamanho da amostra de auditoria manual")
+
+validation_manifest = read_json_if_exists(CURRENT_08_ROOT / "reports" / "validation_manifest.json")
+if validation_manifest:
+    add_rebuild("08", "Pipe4", "pipe4_bootstrap_rounds", int(validation_manifest.get("bootstrap_rounds", 0)), CURRENT_08_ROOT / "reports" / "validation_manifest.json", "numero de rodadas bootstrap do Pipe 4")
+
+log("[08] snapshot coletado")
+
+rebuild_df = pd.DataFrame(rebuild_rows)
+rebuild_df.to_csv(TABLES_DIR / "rebuild_snapshot_metrics.csv", index=False)
+display(rebuild_df.head(60))
+'''
+
+
+PIPE9_COMPARE = r'''
+# ============================================================
+# Comparacoes paper original vs rebuild + claims para manuscrito
+# ============================================================
+
+stage_banner("COMPARACOES E CLAIMS")
+
+historical_df = pd.read_csv(TABLES_DIR / "historical_reference_metrics.csv")
+rebuild_df = pd.read_csv(TABLES_DIR / "rebuild_snapshot_metrics.csv")
+
+direct_keys = [
+    "Nucleo_core_rows_used",
+    "Nucleo_core_k",
+    "PIML_core_rows_used",
+    "PIML_core_k",
+    "CombFinal_core_rows_used",
+    "CombFinal_core_k",
+    "ML_Multimodal_core_rows_used",
+    "ML_Multimodal_core_k",
+    "scibert_dapt_docs",
+    "scibert_dapt_perplexity",
+    "scibert_contrastive_pairs",
+    "scibert_ab_docs",
+    "scibert_ab_classes",
+    "scibert_mrr_baseline",
+    "scibert_mrr_specialized",
+    "scibert_recall10_baseline",
+    "scibert_recall10_specialized",
+    "scibert_recall50_baseline",
+    "scibert_recall50_specialized",
+    "scibert_recall100_baseline",
+    "scibert_recall100_specialized",
+    "scibert_nmi_baseline",
+    "scibert_nmi_specialized",
+    "scibert_ari_baseline",
+    "scibert_ari_specialized",
+    "scibert_silhouette_baseline",
+    "scibert_silhouette_specialized",
+    "scibert_nearest_centroid_baseline",
+    "scibert_nearest_centroid_specialized",
+    "pipe2_application_docs_rows",
+    "pipe2_index_map_rows",
+]
+
+expansion_keys = [
+    "Nucleo_total_docs",
+    "PIML_total_docs",
+    "CombFinal_total_docs",
+]
+
+
+def build_comparison_df(metric_keys: list[str]) -> pd.DataFrame:
+    hist = historical_df[historical_df["metric_key"].isin(metric_keys)].copy()
+    reb = rebuild_df[rebuild_df["metric_key"].isin(metric_keys)].copy()
+    merged = hist.merge(
+        reb,
+        on="metric_key",
+        how="outer",
+        suffixes=("_historical", "_rebuild"),
+    )
+    merged["historical_value_num"] = merged["value_historical"].map(normalize_number)
+    merged["rebuild_value_num"] = merged["value_rebuild"].map(normalize_number)
+    merged["abs_delta"] = pd.to_numeric(merged["rebuild_value_num"], errors="coerce") - pd.to_numeric(merged["historical_value_num"], errors="coerce")
+    merged["pct_delta"] = np.where(
+        pd.to_numeric(merged["historical_value_num"], errors="coerce").abs().gt(1e-9),
+        merged["abs_delta"] / pd.to_numeric(merged["historical_value_num"], errors="coerce"),
+        np.nan,
+    )
+    merged["status"] = [
+        comparison_status(h, r)
+        for h, r in zip(merged["historical_value_num"], merged["rebuild_value_num"])
+    ]
+    return merged
+
+
+direct_df = build_comparison_df(direct_keys)
+expansion_df = build_comparison_df(expansion_keys)
+historical_only_df = historical_df.loc[~historical_df["metric_key"].isin(rebuild_df["metric_key"])].copy()
+rebuild_only_df = rebuild_df.loc[~rebuild_df["metric_key"].isin(historical_df["metric_key"])].copy()
+
+direct_df.to_csv(TABLES_DIR / "direct_comparisons.csv", index=False)
+expansion_df.to_csv(TABLES_DIR / "expansion_comparisons.csv", index=False)
+historical_only_df.to_csv(TABLES_DIR / "historical_only_metrics.csv", index=False)
+rebuild_only_df.to_csv(TABLES_DIR / "rebuild_only_metrics.csv", index=False)
+
+hist_lookup = historical_df.set_index("metric_key")["value"].to_dict()
+rebuild_lookup = rebuild_df.set_index("metric_key")["value"].to_dict()
+
+claims_rows = [
+    {
+        "claim_id": "C1",
+        "claim": "O rebuild preserva a familia de metrica do Phase I e o retriever especializado continua superando o baseline no benchmark paper-facing.",
+        "historical_anchor": f"MRR FT={fmt_num(hist_lookup.get('scibert_mrr_specialized'))}; Recall@10 FT={fmt_num(hist_lookup.get('scibert_recall10_specialized'))}",
+        "rebuild_anchor": f"MRR FT={fmt_num(rebuild_lookup.get('scibert_mrr_specialized'))}; Recall@10 FT={fmt_num(rebuild_lookup.get('scibert_recall10_specialized'))}",
+        "recommended_use": "usar na secao metodologica/experimental como continuidade controlada do paper original",
+    },
+    {
+        "claim_id": "C2",
+        "claim": "O major review adiciona um espelhamento temporal explicito via holdout sem contaminar o treino do retriever especializado.",
+        "historical_anchor": "pipeline historico sem split temporal auditavel",
+        "rebuild_anchor": f"Nucleo total={fmt_num(rebuild_lookup.get('Nucleo_total_docs'))}; PIML total={fmt_num(rebuild_lookup.get('PIML_total_docs'))}; CombFinal total={fmt_num(rebuild_lookup.get('CombFinal_total_docs'))}",
+        "recommended_use": "usar na resposta ao major review e na secao de desenho do estudo",
+    },
+    {
+        "claim_id": "C3",
+        "claim": "A ponte entre retriever e experimento final agora e rastreavel por docs_master, index_map, manifests e pacotes por camada.",
+        "historical_anchor": f"pipe2 docs_master historico={fmt_num(hist_lookup.get('pipe2_application_docs_rows'))}",
+        "rebuild_anchor": f"pipe2 core docs_master={fmt_num(rebuild_lookup.get('pipe2_application_docs_rows'))}; pipe4 bootstrap={fmt_num(rebuild_lookup.get('pipe4_bootstrap_rounds'))}",
+        "recommended_use": "usar na narrativa de reproducibilidade e auditabilidade",
+    },
+    {
+        "claim_id": "C4",
+        "claim": "O pacote final do major review separa a evidencia principal do retriever (Pipe 05) da robustez temporal e estatistica (Pipes 07 e 08).",
+        "historical_anchor": "paper original condensava a historia real do pipeline em uma narrativa unica",
+        "rebuild_anchor": "Pipes 05, 07, 08 e 09 deixam a historia metodologica explicita e modular",
+        "recommended_use": "usar na organizacao da secao Results + Discussion + Appendix",
+    },
+]
+
+claims_df = pd.DataFrame(claims_rows)
+claims_df.to_csv(TABLES_DIR / "manuscript_claims.csv", index=False)
+
+display(direct_df.head(40))
+display(expansion_df)
+display(claims_df)
+'''
+
+
+PIPE9_EXPORT = r'''
+# ============================================================
+# Storyline, pacote Excel e inventario
+# ============================================================
+
+stage_banner("EXPORT FINAL DO PIPE 9")
+
+historical_df = pd.read_csv(TABLES_DIR / "historical_reference_metrics.csv")
+rebuild_df = pd.read_csv(TABLES_DIR / "rebuild_snapshot_metrics.csv")
+direct_df = pd.read_csv(TABLES_DIR / "direct_comparisons.csv")
+expansion_df = pd.read_csv(TABLES_DIR / "expansion_comparisons.csv")
+layer_crosswalk = pd.read_csv(TABLES_DIR / "layer_crosswalk.csv")
+evolution_df = pd.read_csv(TABLES_DIR / "major_review_evolution_points.csv")
+claims_df = pd.read_csv(TABLES_DIR / "manuscript_claims.csv")
+
+hist_lookup = historical_df.set_index("metric_key")["value"].to_dict()
+rebuild_lookup = rebuild_df.set_index("metric_key")["value"].to_dict()
+
+story_lines = [
+    "# Methodological Storyline Pack",
+    "",
+    "## 1. O que o paper original fez de fato",
+    "",
+    "1. Consolidou bases via scripts R.",
+    "2. Derivou estrutura semantica upstream com `Abstract_LLM_*`.",
+    "3. Treinou o retriever especializado `SciBERT-SolarPhysics-Search`.",
+    "4. Aplicou o retriever ao corpus `ML` para analytics e gaps.",
+    "5. Gerou o experimento final em `Piepe_3_Scientometrics`.",
+    "6. Fez uma validacao estatistica final menos estruturada.",
+    "",
+    "## 2. O que o rebuild canonico preservou",
+    "",
+    f"- Nucleo core rows used: historico={fmt_num(hist_lookup.get('Nucleo_core_rows_used'))} vs rebuild={fmt_num(rebuild_lookup.get('Nucleo_core_rows_used'))}.",
+    f"- PIML core rows used: historico={fmt_num(hist_lookup.get('PIML_core_rows_used'))} vs rebuild={fmt_num(rebuild_lookup.get('PIML_core_rows_used'))}.",
+    f"- CombFinal core rows used: historico={fmt_num(hist_lookup.get('CombFinal_core_rows_used'))} vs rebuild={fmt_num(rebuild_lookup.get('CombFinal_core_rows_used'))}.",
+    f"- ML core rows used: historico={fmt_num(hist_lookup.get('ML_Multimodal_core_rows_used'))} vs rebuild={fmt_num(rebuild_lookup.get('ML_Multimodal_core_rows_used'))}.",
+    f"- k historico dos corpora tematicos = 30; rebuild: Nucleo={fmt_num(rebuild_lookup.get('Nucleo_core_k'))}, PIML={fmt_num(rebuild_lookup.get('PIML_core_k'))}, CombFinal={fmt_num(rebuild_lookup.get('CombFinal_core_k'))}, ML={fmt_num(rebuild_lookup.get('ML_Multimodal_core_k'))}.",
+    "",
+    "## 3. O que o Phase I mostrou",
+    "",
+    f"- DAPT docs: historico={fmt_num(hist_lookup.get('scibert_dapt_docs'))} vs rebuild={fmt_num(rebuild_lookup.get('scibert_dapt_docs'))}.",
+    f"- DAPT perplexity: historico={fmt_num(hist_lookup.get('scibert_dapt_perplexity'))} vs rebuild={fmt_num(rebuild_lookup.get('scibert_dapt_perplexity'))}.",
+    f"- Contrastive pairs: historico={fmt_num(hist_lookup.get('scibert_contrastive_pairs'))} vs rebuild={fmt_num(rebuild_lookup.get('scibert_contrastive_pairs'))}.",
+    f"- A/B docs/classes: historico={fmt_num(hist_lookup.get('scibert_ab_docs'))}/{fmt_num(hist_lookup.get('scibert_ab_classes'))} vs rebuild={fmt_num(rebuild_lookup.get('scibert_ab_docs'))}/{fmt_num(rebuild_lookup.get('scibert_ab_classes'))}.",
+    f"- MRR baseline->specialized no paper original: {fmt_num(hist_lookup.get('scibert_mrr_baseline'))} -> {fmt_num(hist_lookup.get('scibert_mrr_specialized'))}.",
+    f"- MRR baseline->specialized no rebuild: {fmt_num(rebuild_lookup.get('scibert_mrr_baseline'))} -> {fmt_num(rebuild_lookup.get('scibert_mrr_specialized'))}.",
+    f"- Recall@10 baseline->specialized no rebuild: {fmt_num(rebuild_lookup.get('scibert_recall10_baseline'))} -> {fmt_num(rebuild_lookup.get('scibert_recall10_specialized'))}.",
+    "",
+    "## 4. O que mudou para responder ao major review",
+    "",
+    "- Introducao explicita do split `core/holdout` em todas as camadas de aplicacao.",
+    "- Treino do retriever mantido apenas em `Nucleo_core + PIML_core + CombFinal_core`.",
+    "- Inclusao do baseline `BM25` no downstream.",
+    "- Reconstrucao de `docs_master`, `index_map`, indices FAISS e bundles por periodo.",
+    "- Pacote estatistico final com bootstrap CI, deltas e amostra de auditoria manual.",
+    "- Publicacao do modelo especializado no Hugging Face.",
+    "",
+    "## 5. Como contar a historia no manuscrito revisado",
+    "",
+    "- Use o `core` como regime principal de replicacao do paper original.",
+    "- Use o `holdout` como espelhamento temporal da mesma familia de aplicacoes.",
+    "- Use o `05` como evidencia principal de que o retriever especializado preserva o comportamento central do paper e supera o baseline em metricas rank-based e de clustering.",
+    "- Use o `06` como camada de rastreabilidade do corpus de aplicacao.",
+    "- Use o `07` como camada de bundles grounded e exemplos de gap.",
+    "- Use o `08` como robustez estatistica e validacao temporal; evite vender `raw score delta` entre retrievers como headline principal.",
+    "",
+    "## 6. Claims recomendados",
+    "",
+]
+
+for row in claims_df.itertuples(index=False):
+    story_lines.append(f"- {row.claim_id}: {row.claim}")
+    story_lines.append(f"  Historico: {row.historical_anchor}")
+    story_lines.append(f"  Rebuild: {row.rebuild_anchor}")
+    story_lines.append(f"  Uso: {row.recommended_use}")
+
+story_md = "\n".join(story_lines) + "\n"
+(REPORTS_DIR / "methodological_storyline.md").write_text(story_md, encoding="utf-8")
+
+manuscript_notes = pd.DataFrame(
+    [
+        {
+            "section": "Methods - Study Design",
+            "what_to_say": "explicar o split core/holdout e o treino core-only do retriever especializado",
+            "primary_evidence": str(TABLES_DIR / "layer_crosswalk.csv"),
+        },
+        {
+            "section": "Methods - Retriever Training",
+            "what_to_say": "comparar o Phase I historico com o rebuild do Pipe 05",
+            "primary_evidence": str(TABLES_DIR / "direct_comparisons.csv"),
+        },
+        {
+            "section": "Results - Gap Retrieval",
+            "what_to_say": "usar os bundles grounded do Pipe 07 e os candidatos de white space do Pipe 06",
+            "primary_evidence": str(CURRENT_07_ROOT / "tables" / "agent_outputs.csv"),
+        },
+        {
+            "section": "Results - Robustness",
+            "what_to_say": "usar CIs e deltas do Pipe 08 como robustez temporal e estatistica",
+            "primary_evidence": str(CURRENT_08_ROOT / "tables" / "statistical_summary.csv"),
+        },
+    ]
+)
+manuscript_notes.to_csv(TABLES_DIR / "manuscript_section_notes.csv", index=False)
+
+
+def inventory_root(root: Path, scope_label: str) -> list[dict]:
+    rows = []
+    if not root.exists():
+        return rows
+    allowed_suffixes = {".csv", ".json", ".jsonl", ".md", ".xlsx", ".ipynb", ".pdf", ".png", ".faiss", ".npy", ".txt"}
+    for path in sorted(root.rglob("*")):
+        if path.is_file() and path.suffix.lower() in allowed_suffixes:
+            rows.append(
+                {
+                    "scope": scope_label,
+                    "artifact": str(path),
+                    "size_bytes": path.stat().st_size,
+                    "suffix": path.suffix.lower(),
+                }
+            )
+    return rows
+
+
+inventory_rows = []
+for corpus in CORPORA:
+    inventory_rows.extend(inventory_root(DATA_ROOT / corpus / "04_rebuild_outputs" / "00_consolidacao", f"current_00_{corpus}"))
+    inventory_rows.extend(inventory_root(DATA_ROOT / corpus / "04_rebuild_outputs" / "01_abstract_llm", f"current_01_{corpus}"))
+
+inventory_rows.extend(inventory_root(CURRENT_05_ROOT, "current_05"))
+inventory_rows.extend(inventory_root(CURRENT_06_ROOT, "current_06"))
+inventory_rows.extend(inventory_root(CURRENT_07_ROOT, "current_07"))
+inventory_rows.extend(inventory_root(CURRENT_08_ROOT, "current_08"))
+inventory_rows.extend(inventory_root(HISTORICAL_ROOT, "historical_root"))
+inventory_rows.extend(inventory_root(HISTORICAL_FINAL_ROOT, "historical_final_root"))
+
+inventory_df = pd.DataFrame(inventory_rows)
+inventory_df.to_csv(TABLES_DIR / "artifact_inventory.csv", index=False)
+
+with pd.ExcelWriter(REPORTS_DIR / "pipe09_method_story_pack.xlsx", engine="openpyxl") as writer:
+    historical_df.to_excel(writer, sheet_name="historical_refs", index=False)
+    rebuild_df.to_excel(writer, sheet_name="rebuild_snapshot", index=False)
+    direct_df.to_excel(writer, sheet_name="direct_comparisons", index=False)
+    expansion_df.to_excel(writer, sheet_name="expansion", index=False)
+    layer_crosswalk.to_excel(writer, sheet_name="layer_crosswalk", index=False)
+    evolution_df.to_excel(writer, sheet_name="major_review_delta", index=False)
+    claims_df.to_excel(writer, sheet_name="manuscript_claims", index=False)
+    manuscript_notes.to_excel(writer, sheet_name="section_notes", index=False)
+
+with open(REPORTS_DIR / "story_pack_manifest.json", "w", encoding="utf-8") as fh:
+    json.dump(
+        {
+            "run_ts": RUN_TS,
+            "write_root": str(WRITE_ROOT),
+            "historical_root": str(HISTORICAL_ROOT),
+            "historical_final_root": str(HISTORICAL_FINAL_ROOT),
+            "current_roots": {
+                "05": str(CURRENT_05_ROOT),
+                "06": str(CURRENT_06_ROOT),
+                "07": str(CURRENT_07_ROOT),
+                "08": str(CURRENT_08_ROOT),
+            },
+            "tables": [
+                "historical_reference_metrics.csv",
+                "rebuild_snapshot_metrics.csv",
+                "direct_comparisons.csv",
+                "expansion_comparisons.csv",
+                "layer_crosswalk.csv",
+                "major_review_evolution_points.csv",
+                "manuscript_claims.csv",
+                "manuscript_section_notes.csv",
+                "artifact_inventory.csv",
+            ],
+            "reports": [
+                "methodological_storyline.md",
+                "pipe09_method_story_pack.xlsx",
+            ],
+        },
+        fh,
+        indent=2,
+        ensure_ascii=False,
+    )
+
+display(direct_df.head(30))
+display(claims_df)
+display(manuscript_notes)
+print("Arquivos finais salvos em:", WRITE_ROOT)
+'''
+
+
 def build_abstract_notebook(corpus: str, notebook_id: str, filename: str) -> tuple[Path, list[dict]]:
     mapping = {
         "CORPUS": corpus,
@@ -3515,6 +4448,21 @@ def build_pipe4_notebook() -> tuple[Path, list[dict]]:
     return NOTEBOOK_ROOT / "08_pipe4_statistical_validation_rebuild.ipynb", cells
 
 
+def build_pipe9_notebook() -> tuple[Path, list[dict]]:
+    cells = [
+        md_cell(PIPE9_MD),
+        code_cell(PIPE9_INSTALL),
+        code_cell(PIPE9_IMPORTS),
+        code_cell(PIPE9_CONFIG),
+        code_cell(PIPE9_LOGGING),
+        code_cell(PIPE9_HISTORICAL),
+        code_cell(PIPE9_REBUILD),
+        code_cell(PIPE9_COMPARE),
+        code_cell(PIPE9_EXPORT),
+    ]
+    return NOTEBOOK_ROOT / "09_methodological_storyline_pack.ipynb", cells
+
+
 def main() -> None:
     notebook_specs = [
         build_abstract_notebook("Nucleo", "01", "01_abstract_llm_nucleo_core_holdout.ipynb"),
@@ -3525,6 +4473,7 @@ def main() -> None:
         build_pipe2_notebook(),
         build_pipe3_notebook(),
         build_pipe4_notebook(),
+        build_pipe9_notebook(),
     ]
 
     for path, cells in notebook_specs:
