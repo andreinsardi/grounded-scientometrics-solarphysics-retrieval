@@ -1,20 +1,20 @@
 # Notebook Conventions
 
-## Regras gerais
+## General rules
 
-Todos os notebooks devem:
+All notebooks should:
 
-- ser executáveis manualmente no Colab Pro;
-- montar o Google Drive explicitamente;
-- trabalhar célula por célula;
-- ter comentários claros em cada bloco;
-- imprimir métricas intermediárias;
-- salvar logs e saídas no Drive;
-- deixar rastreável o andamento do processamento.
+- run manually in Colab Pro;
+- mount project storage explicitly;
+- be executed stage by stage;
+- include clear comments for each block;
+- print intermediate metrics and progress updates;
+- persist logs and outputs to project storage;
+- keep processing steps traceable.
 
-## Convenção de nomes
+## Naming convention
 
-Os notebooks novos devem seguir uma ordem explícita:
+The notebooks follow an explicit execution order:
 
 1. `00_consolidacao_rebuild_core_holdout.ipynb`
 2. `01_abstract_llm_nucleo_core_holdout.ipynb`
@@ -26,9 +26,9 @@ Os notebooks novos devem seguir uma ordem explícita:
 8. `07_pipe3_agent_scientometrics_rebuild.ipynb`
 9. `08_pipe4_statistical_validation_rebuild.ipynb`
 
-## Política de GPU
+## GPU policy
 
-### Usar GPU
+### GPU recommended
 
 - `01_abstract_llm_nucleo_core_holdout.ipynb`
 - `02_abstract_llm_piml_core_holdout.ipynb`
@@ -36,19 +36,19 @@ Os notebooks novos devem seguir uma ordem explícita:
 - `04_abstract_llm_ml_core_holdout.ipynb`
 - `05_scibert_solarphysics_search_rebuild.ipynb`
 
-### Não precisa de GPU
+### CPU is sufficient
 
 - `00_consolidacao_rebuild_core_holdout.ipynb`
-- `06_pipe2_retriever_analytics_rebuild.ipynb` em princípio
-- `07_pipe3_agent_scientometrics_rebuild.ipynb` em princípio
+- `06_pipe2_retriever_analytics_rebuild.ipynb`
+- `07_pipe3_agent_scientometrics_rebuild.ipynb`
 - `08_pipe4_statistical_validation_rebuild.ipynb`
 
-## Saídas obrigatórias por notebook
+## Required outputs by notebook
 
-Cada notebook deve salvar:
+Each notebook should save:
 
-- log textual;
-- métricas de progresso;
-- tabelas auxiliares;
-- arquivos consolidados intermediários;
-- manifestos ou auditorias de paridade quando aplicável.
+- textual logs;
+- progress metrics;
+- auxiliary tables;
+- consolidated intermediate files;
+- manifests or audit artifacts when applicable.

@@ -1,64 +1,56 @@
-# Rebuild Overview
+# Repository Overview
 
-## Objetivo
+## Purpose
 
-Reconstruir o pipeline do paper do zero, mas usando o codigo e as regras historicas como ancora metodologica.
+This repository supports the staged reconstruction of the Solar Physics retrieval workflow while preserving comparability with the historical study design.
 
-## Fontes de entrada
+## Input sources
 
-As entradas reais do rebuild estao no Google Drive do projeto:
+The working inputs live in the project storage hierarchy:
 
 - `BASES_UNIFICADAS_POR_TEMA/<corpus>/01_historico_bruto_disponivel`
 - `BASES_UNIFICADAS_POR_TEMA/<corpus>/03_complemento_bruto_2025-09_2026-03`
 
-As referencias historicas consolidadas estao em:
+Historical consolidated references live in:
 
 - `BASES_UNIFICADAS_POR_TEMA/<corpus>/02_historico_consolidado`
 
-## Corpora do estudo
+## Study corpora
 
 1. `Nucleo`
 2. `PIML`
 3. `CombFinal`
 4. `ML_Multimodal`
 
-## Regimes do estudo
+## Study regimes
 
-- `core`: reconstrucao comparavel ao estudo original
-- `holdout`: validacao temporal sem sobreposicao
+- `core`: comparable reconstruction of the main study regime
+- `holdout`: temporally disjoint validation regime
 
-## Regra de espelhamento
+## Mirroring rule
 
-- A familia de aplicacoes do artigo original deve ser reproduzida no `core`.
-- Essa mesma familia de aplicacoes deve ser espelhada no `holdout` sempre que isso nao implicar treino ou tuning com dados futuros.
-- O que permanece exclusivo do `core` e o treino do retriever especializado.
+- The original family of analytical applications must be reproduced on `core`.
+- The same family of applications must be mirrored on `holdout` whenever that does not imply training or tuning on future data.
+- Specialized retriever training remains exclusive to `core`.
 
-## Baselines aprovados
+## Approved baselines
 
-- `SciBERT` generico
+- generic `SciBERT`
 - `SciBERT_SolarPhysics_Search`
 - `BM25`
 
-## Racional dos baselines
+## Baseline rationale
 
-- `SciBERT` generico e o baseline denso principal porque permite medir o efeito da especializacao mantendo constante a familia do encoder.
-- `SciBERT-SolarPhysics-Search` e a variante especializada por adaptacao de dominio.
-- `BM25` entra como baseline lexical classico e interpretavel.
-- `BERT` puro nao entra como controle principal, porque para texto cientifico `SciBERT` ja e o baseline generico mais apropriado.
-- `Sentence-BERT` e outros retrievers densos externos ficam fora deste ciclo para preservar foco e comparabilidade.
+- Generic `SciBERT` is the main dense baseline because it isolates the effect of domain specialization while keeping the encoder family fixed.
+- `SciBERT_SolarPhysics_Search` is the domain-adapted specialized variant.
+- `BM25` is included as a standard lexical baseline.
+- Plain `BERT` is not used as the main generic control because `SciBERT` is already the appropriate scientific-text baseline.
+- Additional external dense retrievers are excluded to preserve focus and comparability.
 
-## Referencias para futura redacao do paper
+## Central rule
 
-- Beltagy, Lo, Cohan (2019), `SciBERT: A Pretrained Language Model for Scientific Text`.
-- Gururangan et al. (2020), `Don't Stop Pretraining: Adapt Language Models to Domains and Tasks`.
-- Thakur et al. (2021), `BEIR: A Heterogenous Benchmark for Zero-shot Evaluation of Information Retrieval Models`.
-- Wang et al. (2022), `Unsupervised Dense Retrieval for Scientific Articles`.
-- Singh et al. (2023), `SciRepEval: A Multi-Format Benchmark for Scientific Document Representations`.
+The repository should preserve:
 
-## Regra central
-
-Nao substituir o estudo antigo por um estudo novo. O rebuild precisa manter:
-
-1. uma replicacao limpa no `core`;
-2. um espelhamento temporal das aplicacoes no `holdout`;
-3. uma comparacao `core vs holdout` como validacao principal.
+1. a clean replication regime on `core`;
+2. a temporal mirroring regime on `holdout`;
+3. an explicit `core` versus `holdout` comparison as the main validation layer.

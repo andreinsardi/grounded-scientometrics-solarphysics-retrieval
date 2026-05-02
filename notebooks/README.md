@@ -1,14 +1,14 @@
 # Notebooks
 
-Esta pasta guardará apenas os notebooks novos do rebuild.
+This directory contains the staged notebooks that reproduce the retrieval workflow.
 
-Regra:
+Rules:
 
-- notebooks sempre comentados célula por célula;
-- foco em execução manual no Colab Pro;
-- leitura e escrita sempre ancoradas no Google Drive;
-- outputs ricos para acompanhamento de progresso.
+- notebooks are executed manually, stage by stage;
+- progress and intermediate diagnostics should remain visible;
+- reads and writes stay anchored to the project storage hierarchy;
+- outputs should be sufficiently rich to support traceability and audit.
 
-O primeiro notebook a ser criado será:
+The first notebook in the execution order is:
 
 - `00_consolidacao_rebuild_core_holdout.ipynb`
